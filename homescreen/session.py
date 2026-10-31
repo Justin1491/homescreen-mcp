@@ -40,6 +40,12 @@ def _unpack(data: bytes) -> tuple[list[Any], list[Any] | None]:
     return blob["state"], blob.get("library")
 
 
+def _widgets(state: list[Any]) -> list[dict[str, Any]]:
+    """Every top-level widget dict in a list-format state (widgets can't be in folders)."""
+    return [x for page in state for x in page
+            if isinstance(x, dict) and (x.get("gridSize") or x.get("elementType") == "widget")]
+
+
 def _safe(s: str) -> str:
     return "".join(c if c.isalnum() or c in "-._" else "_" for c in s)
 
@@ -145,11 +151,40 @@ class Session:
 
     # ---- read -------------------------------------------------------------------
 
+    # ---- widget element ids -------------------------------------------------------------
+    # A widget's link to its configuration is its element id (userSelectedElementIdentifier over
+    # USB). iOS can drop it, so every id ever seen is remembered per widget (by displayIdentifier)
+    # and put back on write.
+
+    @property
+    def _widget_ids_path(self) -> Path:
+        return self._dev_dir("widgets") / "element-ids.json"
+
+    def _remember_widget_ids(self, state: list[Any]) -> None:
+        import json
+        known = json.loads(self._widget_ids_path.read_text()) if self._widget_ids_path.exists() else {}
+        for w in _widgets(state):
+            if w.get("displayIdentifier") and w.get("userSelectedElementIdentifier"):
+                known[w["displayIdentifier"]] = w["userSelectedElementIdentifier"]
+        self._widget_ids_path.write_text(json.dumps(known, indent=1, sort_keys=True))
+
+    def _restore_widget_ids(self, state: list[Any]) -> list[Any]:
+        import json
+        if not self._widget_ids_path.exists():
+            return state
+        known = json.loads(self._widget_ids_path.read_text())
+        state = copy.deepcopy(state)
+        for w in _widgets(state):
+            if not w.get("userSelectedElementIdentifier") and known.get(w.get("displayIdentifier")):
+                w["userSelectedElementIdentifier"] = known[w["displayIdentifier"]]
+        return state
+
     async def read(self) -> dict[str, Any]:
         info = await self.source.info()
         self.device_id = info.get("UniqueDeviceID") or self.source.name
         self.info = {k: v for k, v in info.items() if k in ("DeviceName", "ProductType", "ProductVersion")}
         state, library = await self.source.read()
+        self._remember_widget_ids(state)
         reads = self._dev_dir("reads")
         (reads / f"{_stamp()}.plist").write_bytes(_pack(state, library))
         for old in sorted(reads.glob("*.plist"))[:-KEEP_READS]:
@@ -197,7 +232,9 @@ class Session:
     async def _write_verified(self, target: list[Any], target_lib: list[Any] | None,
                               label: str) -> dict[str, Any]:
         current, current_lib = await self.source.read()
+        self._remember_widget_ids(current)
         backup = self._backup(current, current_lib, label)
+        target = self._restore_widget_ids(target)
         # A backup made before the App Library was tracked has no library list; judge the
         # result on dock and pages only (the source keeps unlisted apps in the library).
         lib_known = target_lib is not None

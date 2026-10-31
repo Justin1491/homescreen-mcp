@@ -89,7 +89,14 @@ def _modern(x: Any) -> Any:
     if x.get(DISK_MARK):
         return x["bundleIdentifier"]
     if is_widget(x):
-        return {k: v for k, v in x.items() if k != "iconLists"}
+        out = {k: v for k, v in x.items() if k != "iconLists"}
+        # Over USB a single widget's uniqueIdentifier isn't exported. Its configuration (which
+        # script, which person) hangs off that id, and userSelectedElementIdentifier holds it for
+        # configured widgets. Without it SpringBoard saves the widget with no id and the
+        # configuration is lost, so put it back.
+        if "uniqueIdentifier" not in out and out.get("userSelectedElementIdentifier") and "elements" not in out:
+            out["uniqueIdentifier"] = out["userSelectedElementIdentifier"]
+        return out
     if is_folder(x):
         out = {k: v for k, v in x.items() if k not in (NAME_MARK, "iconLists")}
         out["iconLists"] = [[_modern(i) for i in page] for page in x["iconLists"] if page]

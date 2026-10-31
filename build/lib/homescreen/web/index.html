@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Homescreen</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='3' width='11' height='11' rx='3' fill='%23ff9f0a'/%3E%3Crect x='18' y='3' width='11' height='11' rx='3' fill='%2330d158'/%3E%3Crect x='3' y='18' width='11' height='11' rx='3' fill='%230a84ff'/%3E%3Crect x='18' y='18' width='11' height='11' rx='3' fill='%23bf5af2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+<script>window.HS_TOKEN = "__TOKEN__";</script>
+</head>
+<body>
+<header class="bar top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="3" width="11" height="11" rx="3" fill="#ff9f0a"/><rect x="18" y="3" width="11" height="11" rx="3" fill="#30d158"/><rect x="3" y="18" width="11" height="11" rx="3" fill="#0a84ff"/><rect x="18" y="18" width="11" height="11" rx="3" fill="#bf5af2"/></svg>
+    <span>Homescreen</span>
+  </div>
+  <div class="device" id="device">No device</div>
+  <div class="spacer"></div>
+  <input id="search" type="search" placeholder="Search apps" autocomplete="off" spellcheck="false">
+  <div class="group">
+    <button id="undo" title="Undo (⌘Z)" aria-label="Undo"><svg viewBox="0 0 20 20"><path d="M8 5 3 9.5 8 14M3.5 9.5H12a5 5 0 0 1 0 10H9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <button id="redo" title="Redo (⇧⌘Z)" aria-label="Redo"><svg viewBox="0 0 20 20"><path d="m12 5 5 4.5-5 4.5M16.5 9.5H8a5 5 0 0 0 0 10h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  </div>
+  <div class="menu-wrap">
+    <button id="organize-btn" aria-haspopup="true">Organize ▾</button>
+    <div class="menu" id="organize-menu" hidden>
+      <button data-op="optimize_usage">Optimize by Screen Time usage</button>
+      <button data-op="sort_color">Sort by color</button>
+      <button data-op="sort_alpha">Sort A–Z</button>
+      <button data-op="group_categories">Group by App Store category…</button>
+      <button data-op="sort_folders">Sort inside folders A–Z</button>
+      <button data-op="remove_empty">Remove empty pages and folders</button>
+      <label class="check"><input type="checkbox" id="keep-first" checked> Leave page 1 alone</label>
+    </div>
+  </div>
+  <button id="reset">Reset</button>
+  <button id="backups-btn">Backups</button>
+  <button id="help" title="How it works" aria-label="Help">?</button>
+  <button id="read" class="primary">Read iPhone</button>
+</header>
+
+<main id="main">
+  <section id="empty" class="empty" hidden>
+    <div class="empty-card">
+      <h1>Arrange your iPhone Home Screen</h1>
+      <p>Connect your iPhone with a cable, unlock it and tap <b>Trust</b> if asked. Then read its Home Screen. Nothing changes on the phone until you choose Apply.</p>
+      <button class="primary big" id="read-empty">Read iPhone</button>
+    </div>
+  </section>
+  <section id="board" hidden>
+    <div class="dock-row">
+      <span class="label">Dock</span>
+      <div class="dock grid-dock" id="dock" data-target="dock"></div>
+    </div>
+    <div class="pages" id="pages"></div>
+    <div class="bank-row">
+      <div class="bank-head"><span class="label">App Bank</span><span class="count" id="bank-count"></span>
+        <span class="hint-inline">Park apps, folders or widgets here while you rearrange. Empty it before applying.</span></div>
+      <div class="bank" id="bank"></div>
+    </div>
+  </section>
+  <aside id="library-panel" hidden>
+    <section class="usage" id="usage"></section>
+    <div class="lib-head">
+      <h2>App Library</h2>
+      <span class="count" id="lib-count"></span>
+    </div>
+    <p class="hint">Apps here are off your Home Screen but still installed. Drag apps in or out.</p>
+    <div class="lib-list" id="library" data-target="library"></div>
+  </aside>
+</main>
+
+<div id="selection-bar" class="floating" hidden>
+  <span id="sel-count"></span>
+  <button id="sel-folder">New folder</button>
+  <button id="sel-library">To App Library</button>
+  <button id="sel-clear">Clear</button>
+</div>
+
+<aside id="drawer" class="drawer" hidden>
+  <div class="drawer-head">
+    <input id="folder-name" aria-label="Folder name">
+    <button id="drawer-close" aria-label="Close">✕</button>
+  </div>
+  <div id="folder-pages" class="folder-pages"></div>
+  <div class="drawer-foot">
+    <button id="folder-add-page">Add folder page</button>
+    <button id="folder-dissolve" class="danger">Remove folder</button>
+  </div>
+</aside>
+
+<footer class="bar bottom">
+  <div id="summary" class="summary">No changes</div>
+  <div class="spacer"></div>
+  <button id="review" class="primary" disabled>Review & Apply</button>
+</footer>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true">
+    <h2 id="modal-title"></h2>
+    <div id="modal-body"></div>
+    <div class="modal-actions" id="modal-actions"></div>
+  </div>
+</div>
+<div id="toast" class="toast" hidden></div>
+<div id="busy" class="busy" hidden><div class="spinner"></div><span id="busy-text">Working…</span></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

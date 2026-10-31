@@ -172,3 +172,30 @@ def test_bank_and_swap(dict_phone, tmp_path):
     assert ids.index(b) < ids.index(a)
     with pytest.raises(LayoutError, match="widgets"):
         s2.edit(lambda lay: lay.swap(w, next(x.id for x in lay.dock)))
+
+
+def test_widget_configuration_ids_survive_writes(tmp_path):
+    """A configured widget's element id must go out as uniqueIdentifier, and an id iOS dropped
+    must be restored from an earlier read."""
+    from homescreen.device import to_root_archive
+    from fake_phone import app as mkapp
+    w = {"bundleIdentifier": "dk.simonbs.Scriptable.ScriptableWidget", "containerBundleIdentifier": "dk.simonbs.Scriptable",
+         "displayIdentifier": "W-DISPLAY", "elementType": "widget", "gridSize": "small", "iconLists": [],
+         "iconType": "custom", "userSelectedElementIdentifier": "ELEMENT-1"}
+    out = to_root_archive([[], [w, mkapp("com.a.b", "B")]], [])
+    sent = out["iconLists"][0][0]
+    assert sent["uniqueIdentifier"] == "ELEMENT-1" and "iconLists" not in sent
+    stack = {**w, "elements": [{"uniqueIdentifier": "E1"}, {"uniqueIdentifier": "E2"}]}
+    assert "uniqueIdentifier" not in to_root_archive([[], [stack]], [])["iconLists"][0][0]
+
+    path = tmp_path / "phone.plist"
+    path.write_bytes(plistlib.dumps([[], [w, mkapp("com.a.b", "B")]]))
+    s = Session(FileSource(path), tmp_path / "data")
+    asyncio.run(s.read())                       # remembers ELEMENT-1
+    dropped = {k: v for k, v in w.items() if k != "userSelectedElementIdentifier"}
+    path.write_bytes(plistlib.dumps([[], [dropped, mkapp("com.a.b", "B")]]))   # iOS dropped it
+    asyncio.run(s.read())
+    res = asyncio.run(s.apply(s.require().token()))
+    assert res["ok"]
+    written = plistlib.loads(path.read_bytes())
+    assert written[1][0]["userSelectedElementIdentifier"] == "ELEMENT-1"
