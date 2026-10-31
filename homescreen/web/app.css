@@ -76,8 +76,13 @@ main { flex: 1; display: flex; min-height: 0; }
 .page:hover .page-head .tools { opacity: 1; }
 .page-head .tools button { padding: 2px 7px; border-radius: 6px; background: transparent; border: 0; font-size: 12px; }
 .page-head .tools button:hover { background: var(--panel-2); }
-.grid { display: grid; grid-template-columns: repeat(4, 72px); grid-auto-rows: 84px; gap: 4px; min-height: 516px;
-  align-content: start; justify-content: space-between; }
+.grid { display: grid; grid-template-columns: repeat(4, 72px); grid-template-rows: repeat(6, 84px); gap: 4px;
+  justify-content: space-between; position: relative; }
+.slot { border-radius: 14px; }
+.slot.drop-cell { background: var(--drop); outline: 2px dashed var(--accent); outline-offset: -4px; }
+.grid.dragging-on .slot { outline: 1px dashed var(--line); outline-offset: -6px; }
+.item.pinned::before { content: ""; position: absolute; top: 3px; left: 7px; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent); border: 2px solid var(--phone); z-index: 1; }
 .add-page { width: 120px; min-height: 120px; border: 2px dashed var(--line); border-radius: 26px; display: grid;
   place-items: center; color: var(--muted); align-self: stretch; cursor: pointer; }
 .add-page.drop-zone { border-color: var(--accent); background: var(--drop); }

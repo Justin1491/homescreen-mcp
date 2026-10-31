@@ -246,7 +246,27 @@ function renderPages() {
     card.appendChild(head);
     const grid = el("div", "grid");
     const ctx = { target: `page:${n}` };
-    for (const it of page) grid.appendChild(renderItem(it, ctx));
+    const taken = new Set();
+    for (const it of page) {
+      const node = renderItem(it, ctx);
+      if (it.pos) {
+        const [r, c, w, h] = it.pos;
+        node.style.gridRow = `${r + 1} / span ${h}`;
+        node.style.gridColumn = `${c + 1} / span ${w}`;
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) taken.add((r + y) * 4 + c + x);
+      }
+      if (it.pinned) node.classList.add("pinned");
+      grid.appendChild(node);
+    }
+    for (let cell = 0; cell < 24; cell++) {
+      if (taken.has(cell)) continue;
+      const slot = el("div", "slot");
+      slot.style.gridRow = `${Math.floor(cell / 4) + 1}`;
+      slot.style.gridColumn = `${(cell % 4) + 1}`;
+      slot.title = "Drop here to place an app exactly in this spot";
+      wireSlot(slot, n, cell);
+      grid.appendChild(slot);
+    }
     card.appendChild(grid);
     wireZone(card, ctx);
     box.appendChild(card);
@@ -351,6 +371,7 @@ function renderSelection() {
   bar.hidden = sel.size === 0;
   $("#sel-count").textContent = `${sel.size} selected`;
   $("#sel-library").disabled = V.library === null;
+  $("#sel-unpin").hidden = ![...sel].some((i) => (findItem(i) || {}).pinned);
 }
 
 function renderFooter() {
@@ -360,14 +381,15 @@ function renderFooter() {
   const d = V.diff;
   s.replaceChildren();
   const add = (t, b) => { if (b) { s.appendChild(el("b", null, t)); } else s.appendChild(document.createTextNode(t)); };
-  if (!d.items_moved && d.pages_before === d.pages_after) add("No changes");
+  if (!d.items_moved && d.pages_before === d.pages_after && !d.gaps_changed) add("No changes");
   else {
     add(`${d.items_moved}`, true); add(` apps moved`);
     if (d.to_app_library) { add(" · "); add(`${d.to_app_library}`, true); add(" to App Library"); }
     if (d.pages_before !== d.pages_after) { add(" · pages "); add(`${d.pages_before} → ${d.pages_after}`, true); }
+    if (d.gaps_changed) { add(" · "); add(`${d.gaps_changed}`, true); add(" gap change" + (d.gaps_changed > 1 ? "s" : "")); }
   }
   if (d.problems.length) s.appendChild(el("span", "problem", ` · ${d.problems.length} problem${d.problems.length > 1 ? "s" : ""}`));
-  btn.disabled = !d.items_moved && d.pages_before === d.pages_after;
+  btn.disabled = !d.items_moved && d.pages_before === d.pages_after && !d.gaps_changed;
 }
 
 // ---- interaction -----------------------------------------------------------------------
@@ -387,8 +409,8 @@ function onItemClick(e, item) {
 }
 
 function clearMarks() {
-  document.querySelectorAll(".ins-before,.ins-after,.ins-onto,.drop-zone").forEach((n) =>
-    n.classList.remove("ins-before", "ins-after", "ins-onto", "drop-zone"));
+  document.querySelectorAll(".ins-before,.ins-after,.ins-onto,.drop-zone,.drop-cell").forEach((n) =>
+    n.classList.remove("ins-before", "ins-after", "ins-onto", "drop-zone", "drop-cell"));
 }
 
 function zoneOf(e, node, item) {
@@ -433,6 +455,25 @@ function wireDrag(node, item, ctx) {
       before = rest[0] || null;
     }
     moveIds(ids, ctx.target, before);
+  });
+}
+
+function wireSlot(slot, page, cell) {
+  slot.addEventListener("dragover", (e) => {
+    if (!drag || drag.ids.length !== 1) return;
+    e.preventDefault();
+    e.stopPropagation();
+    clearMarks();
+    slot.classList.add("drop-cell");
+  });
+  slot.addEventListener("dragleave", () => slot.classList.remove("drop-cell"));
+  slot.addEventListener("drop", (e) => {
+    if (!drag || drag.ids.length !== 1) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const id = drag.ids[0];
+    clearMarks();
+    op("pin", { id, page, cell }).then((ok) => ok && sel.clear());
   });
 }
 
@@ -542,6 +583,10 @@ async function review() {
     ul.appendChild(li);
   }
   body.appendChild(ul);
+  if (V.gaps && !V.gaps.readable) {
+    body.appendChild(el("p", null, "Gaps: iOS doesn't report empty spaces or hidden pages over USB, so any gaps made on the iPhone itself will close. "
+      + (V.gaps.count ? `The ${V.gaps.count} placed item${V.gaps.count > 1 ? "s" : ""} you set here keep their spots.` : "To keep a gap, place the app in that spot here.")));
+  }
   body.appendChild(el("p", null, "Your current layout is backed up first. After writing, the app reads the iPhone again to check the result."));
   const actions = [{ label: d.problems.length ? "Close" : "Cancel", value: () => false }];
   if (!d.problems.length) actions.push({ label: "Apply", primary: true, value: () => true });
@@ -621,6 +666,7 @@ $("#help").onclick = () => {
     ["Drop on an app's middle", "make a folder with both"],
     ["Drop on a folder", "put it inside"],
     ["Hold ⌥ Option while dropping on an icon", "swap the two"],
+    ["Drop on an empty spot", "place it exactly there, leaving gaps (blue dot = placed)"],
     ["⌘-click", "select several, then New folder or To App Library"],
     ["Delete", "send the selected apps to the App Library"],
     ["App Bank", "park items while you rearrange; empty it before applying"],
@@ -654,6 +700,7 @@ $("#keep-first").onchange = (e) => { try { localStorage.setItem("hs.keepFirst", 
 $("#search").oninput = (e) => { query = e.target.value.trim().toLowerCase(); render(); };
 $("#sel-folder").onclick = newFolderFromSelection;
 $("#sel-library").onclick = selectionToLibrary;
+$("#sel-unpin").onclick = () => op("unpin", { ids: [...sel] }).then((ok) => ok && (sel.clear(), render()));
 $("#sel-clear").onclick = () => { sel.clear(); render(); };
 $("#drawer-close").onclick = () => { openFolder = null; render(); };
 $("#folder-name").onchange = (e) => {

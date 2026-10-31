@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import json
+import uuid
 import plistlib
 from pathlib import Path
 from typing import Any, Callable
 
 from . import colors
 from .device import Source
-from .model import Layout, LayoutError, structure
+from .model import Layout, LayoutError, Node, structure
 
 KEEP_READS = 10
 MAX_UNDO = 200
@@ -26,18 +28,96 @@ def _stamp() -> str:
     return dt.datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def _pack(state: list[Any], library: list[Any] | None) -> bytes:
+def _pack(state: list[Any], library: list[Any] | None, pins: list[dict[str, int]] | None = None) -> bytes:
     blob: dict[str, Any] = {"state": state}
     if library is not None:
         blob["library"] = library
+    if pins:
+        blob["pins"] = pins
     return plistlib.dumps(blob, fmt=plistlib.FMT_BINARY)
 
 
 def _unpack(data: bytes) -> tuple[list[Any], list[Any] | None]:
     blob = plistlib.loads(data)
-    if isinstance(blob, list):  # backups from before the App Library existed
+    if isinstance(blob, list):  # backups from before the App Library was tracked
         return blob, None
     return blob["state"], blob.get("library")
+
+
+def _unpack_pins(data: bytes) -> list[dict[str, int]] | None:
+    blob = plistlib.loads(data)
+    return blob.get("pins") if isinstance(blob, dict) else None
+
+
+# ---- gaps (pinned cells) --------------------------------------------------------------
+# In the dict format a pinned item is named by its identifier: bundle id for apps, the icon's
+# uniqueIdentifier for widgets and folders.
+
+def pin_key(node: Node) -> str | None:
+    if node.kind in ("app", "webclip"):
+        return node.bundle_id or node.id
+    if node.kind == "widget":
+        return node.raw.get("uniqueIdentifier") or node.raw.get("userSelectedElementIdentifier")
+    if node.kind == "folder":
+        return node.raw.get("uniqueIdentifier")
+    return None
+
+
+def memory_key(node: Node) -> str | None:
+    """How a gap is remembered across phone reads. Phone folders come back without ids, so
+    folders are remembered by name."""
+    return f"folder:{node.name}" if node.kind == "folder" else pin_key(node)
+
+
+def pins_by_page(lay: Layout) -> list[dict[str, int]]:
+    """Per page, {identifier: cell} for the dict format. Pinned folders without an id get one."""
+    out = []
+    for page in lay.pages:
+        d = {}
+        for n in page:
+            if n.id not in lay.pins:
+                continue
+            if n.kind == "folder" and not n.raw.get("uniqueIdentifier"):
+                n.raw["uniqueIdentifier"] = str(uuid.uuid4()).upper()
+            key = pin_key(n)
+            if key:
+                d[key] = lay.pins[n.id]
+        out.append(d)
+    return out
+
+
+def node_pins(lay: Layout, keyed: dict[str, int], by_memory: bool = False) -> dict[str, int]:
+    """{identifier or memory key: cell} -> {node id: cell}, keeping only pins that fit their page."""
+    wanted: dict[str, int] = {}
+    for page in lay.pages:
+        for n in page:
+            key = memory_key(n) if by_memory else pin_key(n)
+            if key and key in keyed:
+                wanted[n.id] = int(keyed[key])
+    lay.pins = wanted
+    for page in lay.pages:  # a page whose remembered gaps no longer fit loses them
+        if any(n.id in wanted for n in page) and lay.place(page)[1]:
+            for n in page:
+                wanted.pop(n.id, None)
+    return wanted
+
+
+def placed_structure(state: list[Any], library: list[Any] | None, keyed_pins: dict[str, int] | None) -> str:
+    """Like model.structure, but each page lists its items in grid order (row by row) after
+    gaps are applied. iOS reorders a page's list by position when it has gaps, so list order
+    alone would report a correct write as a mismatch."""
+    lay = Layout(state, library=library)
+    if keyed_pins:
+        node_pins(lay, keyed_pins)
+    pages = []
+    for page in lay.pages:
+        pos, _ = lay.place(page)
+        order = sorted(page, key=lambda n: (pos[n.id][0], pos[n.id][1]) if n.id in pos else (99, 0))
+        pages.append([[n.id, pos.get(n.id, (0, 0))[:2]] if n.kind != "folder" else
+                      [n.name, [[c.id for c in fp] for fp in n.children]] for n in order])
+    return json.dumps({"dock": [n.id for n in lay.dock], "pages": pages,
+                       "library": None if library is None else sorted(n.id for n in lay.library or [])},
+                      default=list)
 
 
 def _widgets(state: list[Any]) -> list[dict[str, Any]]:
@@ -59,8 +139,8 @@ class Session:
         self.device_id: str | None = None
         self.info: dict[str, Any] = {}
         self.usage: dict[str, Any] | None = None  # Screen Time opens, loaded on request
-        self._undo: list[tuple[list[Any], list[Any] | None, list[Any]]] = []
-        self._redo: list[tuple[list[Any], list[Any] | None, list[Any]]] = []
+        self._undo: list[tuple[Any, ...]] = []
+        self._redo: list[tuple[Any, ...]] = []
         self._load_draft()
 
     # ---- persistence ------------------------------------------------------------
@@ -78,7 +158,7 @@ class Session:
         assert self.layout is not None
         blob = {"device": self.device_id, "info": self.info, "source": self.layout.source, "state": self.layout.to_state(),
                 "source_library": self.layout.source_library, "library": self.layout.to_library(),
-                "bank": self.layout.to_bank()}
+                "bank": self.layout.to_bank(), "pins": self.layout.pins, "source_pins": self.layout.source_pins}
         blob = {k: v for k, v in blob.items() if v is not None}  # plists have no null
         self.draft_path.write_bytes(plistlib.dumps(blob, fmt=plistlib.FMT_BINARY))
 
@@ -88,7 +168,8 @@ class Session:
             self.device_id = blob["device"]
             self.info = blob.get("info", {})
             self.layout = Layout(blob["state"], source=blob["source"], library=blob.get("library"),
-                                 source_library=blob.get("source_library"), bank=blob.get("bank"))
+                                 source_library=blob.get("source_library"), bank=blob.get("bank"),
+                                 pins=blob.get("pins"), source_pins=blob.get("source_pins"))
 
     def require(self) -> Layout:
         if self.layout is None:
@@ -100,14 +181,16 @@ class Session:
 
     # ---- edits with undo ----------------------------------------------------------
 
-    def _snap(self) -> tuple[list[Any], list[Any] | None, list[Any]]:
+    def _snap(self) -> tuple[Any, ...]:
         lay = self.require()
-        return copy.deepcopy(lay.to_state()), copy.deepcopy(lay.to_library()), copy.deepcopy(lay.to_bank())
+        return (copy.deepcopy(lay.to_state()), copy.deepcopy(lay.to_library()), copy.deepcopy(lay.to_bank()),
+                dict(lay.pins))
 
-    def _load_snap(self, snap: tuple[list[Any], list[Any] | None, list[Any]]) -> None:
+    def _load_snap(self, snap: tuple[Any, ...]) -> None:
         lay = self.require()
         self.layout = Layout(snap[0], lay.page_slots, lay.dock_slots, source=lay.source,
-                             library=snap[1], source_library=lay.source_library, bank=snap[2])
+                             library=snap[1], source_library=lay.source_library, bank=snap[2],
+                             pins=snap[3], source_pins=lay.source_pins)
 
     def edit(self, fn: Callable[[Layout], Any]) -> Any:
         """Run fn on the draft as one undoable step. If it raises, the draft is left untouched."""
@@ -179,6 +262,37 @@ class Session:
                 w["userSelectedElementIdentifier"] = known[w["displayIdentifier"]]
         return state
 
+    # ---- gap memory ----------------------------------------------------------------------
+    # The phone never reports gaps over USB, and a write without them closes every gap. So the
+    # gaps set in Homescreen are remembered per phone and sent again on every write.
+
+    @property
+    def _gaps_path(self) -> Path:
+        return self._dev_dir("gaps") / "pins.json"
+
+    def _remember_gaps(self, lay: Layout) -> None:
+        mem = {}
+        for page in lay.pages:
+            for n in page:
+                key = memory_key(n)
+                if key and n.id in lay.pins:
+                    mem[key] = lay.pins[n.id]
+        self._gaps_path.write_text(json.dumps(mem, indent=1, sort_keys=True))
+
+    def _layout_from(self, state: list[Any], library: list[Any] | None) -> Layout:
+        """A Layout with gaps: from the source when it can report them, else from memory."""
+        lay = Layout(state, library=library)
+        reported = getattr(self.source, "pins", None)
+        if reported is not None:
+            node_pins(lay, reported)
+        elif self._gaps_path.exists():
+            node_pins(lay, json.loads(self._gaps_path.read_text()), by_memory=True)
+        return Layout(state, library=library, pins=lay.pins)
+
+    @property
+    def gaps_readable(self) -> bool:
+        return getattr(self.source, "pins", None) is not None
+
     async def read(self) -> dict[str, Any]:
         info = await self.source.info()
         self.device_id = info.get("UniqueDeviceID") or self.source.name
@@ -189,7 +303,7 @@ class Session:
         (reads / f"{_stamp()}.plist").write_bytes(_pack(state, library))
         for old in sorted(reads.glob("*.plist"))[:-KEEP_READS]:
             old.unlink()
-        self.layout = Layout(state, library=library)
+        self.layout = self._layout_from(state, library)
         self._undo.clear()
         self._redo.clear()
         self._save_draft()
@@ -224,31 +338,42 @@ class Session:
 
     # ---- write ------------------------------------------------------------------
 
-    def _backup(self, state: list[Any], library: list[Any] | None, label: str) -> Path:
+    def _backup(self, state: list[Any], library: list[Any] | None, label: str,
+                pins: list[dict[str, int]] | None = None) -> Path:
         p = self._dev_dir("backups") / f"{_stamp()}-{label}.plist"
-        p.write_bytes(_pack(state, library))
+        p.write_bytes(_pack(state, library, pins))
         return p
 
     async def _write_verified(self, target: list[Any], target_lib: list[Any] | None,
-                              label: str) -> dict[str, Any]:
+                              label: str, pins: list[dict[str, int]] | None = None) -> dict[str, Any]:
         current, current_lib = await self.source.read()
         self._remember_widget_ids(current)
-        backup = self._backup(current, current_lib, label)
+        backup = self._backup(current, current_lib, label,
+                              pins_by_page(self._layout_from(current, current_lib)))
         target = self._restore_widget_ids(target)
         # A backup made before the App Library was tracked has no library list; judge the
         # result on dock and pages only (the source keeps unlisted apps in the library).
         lib_known = target_lib is not None
         try:
-            await self.source.write(target, target_lib)
+            await self.source.write(target, target_lib, pins)
         except Exception as e:
             # A lost response doesn't tell us whether the write landed. Look, don't retry.
             after, after_lib = await self.source.read()
-            landed = structure(after, after_lib if lib_known else None) == structure(target, target_lib)
+            want_pins = {k: v for page in pins or [] for k, v in page.items()}
+            got_pins = getattr(self.source, "pins", None)
+            landed = (placed_structure(after, after_lib if lib_known else None,
+                                       want_pins if got_pins is None else got_pins)
+                      == placed_structure(target, target_lib, want_pins))
             return {"ok": landed, "backup": backup.name,
                     "error": f"write call failed ({e}); re-read shows the new layout "
                              f"{'DID' if landed else 'did NOT'} land. Not retrying."}
         after, after_lib = await self.source.read()
-        ok = structure(after, after_lib if lib_known else None) == structure(target, target_lib)
+        want_pins = {k: v for page in pins or [] for k, v in page.items()}
+        # the phone can't report gaps; there the written gaps are taken as given and the order checked
+        got_pins = getattr(self.source, "pins", None)
+        got_pins = want_pins if got_pins is None else got_pins
+        ok = (placed_structure(after, after_lib if lib_known else None, got_pins)
+              == placed_structure(target, target_lib, want_pins))
         res: dict[str, Any] = {"ok": ok, "backup": backup.name}
         if after_lib is not None:
             res["app_library_only"] = len(after_lib)
@@ -263,7 +388,12 @@ class Session:
                           if k in gp and wp[k] != gp[k] and not k.startswith(("folder:", "widget:"))},
                 "pages": f"wanted {len(target) - 1}, got {len(after) - 1}",
             }
-        self.layout = Layout(after, library=after_lib)
+        if ok:
+            # remember the gaps that were just written (the phone won't report them back)
+            written = Layout(after, library=after_lib)
+            node_pins(written, {k: v for page in pins or [] for k, v in page.items()})
+            self._remember_gaps(written)
+        self.layout = self._layout_from(after, after_lib)
         self._undo.clear()
         self._redo.clear()
         self._save_draft()
@@ -280,7 +410,7 @@ class Session:
         if structure(now, now_lib) != structure(lay.source, lay.source_library):
             raise LayoutError("the phone's layout changed since it was read (app installed or moved?). "
                               "Read again and redo the edits.")
-        return await self._write_verified(lay.to_state(), lay.to_library(), "before-apply")
+        return await self._write_verified(lay.to_state(), lay.to_library(), "before-apply", pins_by_page(lay))
 
     def backups(self) -> list[str]:
         return sorted(p.name for p in self._dev_dir("backups").glob("*.plist"))
@@ -289,4 +419,5 @@ class Session:
         p = self._dev_dir("backups") / name
         if not p.exists() or p.parent != self._dev_dir("backups"):
             raise LayoutError(f"no backup named {name!r}")
-        return await self._write_verified(*_unpack(p.read_bytes()), "before-restore")
+        data = p.read_bytes()
+        return await self._write_verified(*_unpack(data), "before-restore", _unpack_pins(data))

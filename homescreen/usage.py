@@ -132,6 +132,7 @@ def optimize(lay: Layout, opens: dict[str, int], keep_first_page: bool = False) 
             items = sorted(_leaves(n), key=lambda c: -opens.get(c.bundle_id or c.id, 0))
             n.children = [items[i:i + 9] for i in range(0, len(items), 9)] or [[]]
     start = 1 if keep_first_page and lay.pages else 0
+    lay.unpin_pages(start)
     pages = lay.pages[start:]
     widgets = [[x for x in p if x.kind == "widget"] for p in pages]
     movable = sorted((x for p in pages for x in p if x.kind != "widget"), key=lambda n: -score(n))

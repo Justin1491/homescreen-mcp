@@ -31,3 +31,10 @@ Findings (iOS 27.2 simulator, 2026-10-31):
   stay as they were. Apps must be bundle-id strings, or SpringBoard saves the dicts verbatim.
 - An app left out of both `iconLists` and `ignored` is still put on a page.
 - `importIconState:` returns NO for the string form even though it applies; verify by re-reading.
+- Gaps: a page's pinned cells live in `listMetadata[<page id>].fixedLocations` ({identifier: cell 0-23},
+  with `fixedLocationsGridColumns`/`Rows`). Importing them with our own `listUniqueIdentifiers` works;
+  importing without them clears every gap. None of SpringBoard's exports (`exportState:`,
+  `exportFlattenedState:includeMissingIcons:`, `exportPendingState:includeMissingIcons:`, i.e. the USB
+  getIconState paths) carry them. The `homescreen.exports` hook in `sbinject.m` dumps all three.
+- Widgets: a configured widget's settings hang off its element id; over USB that is
+  `userSelectedElementIdentifier`, and it must be written back as `uniqueIdentifier`.

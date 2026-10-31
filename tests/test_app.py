@@ -199,3 +199,85 @@ def test_widget_configuration_ids_survive_writes(tmp_path):
     assert res["ok"]
     written = plistlib.loads(path.read_bytes())
     assert written[1][0]["userSelectedElementIdentifier"] == "ELEMENT-1"
+
+
+# ---- gaps ---------------------------------------------------------------------------------
+
+from pathlib import Path
+IOS27 = Path(__file__).parent / "fixtures" / "ios27.2-sim-IconState.plist"
+
+def _gap_layout():
+    from fake_phone import app as mkapp, widget
+    page = [widget("Weather", "small")] + [mkapp(f"com.g.a{i}", f"A{i}") for i in range(6)]
+    return [[mkapp("com.g.dock", "Dock")], page]
+
+
+def test_grid_placement_and_pins():
+    lay = Layout(_gap_layout(), library=[])
+    pos, problems = lay.place(lay.pages[0])
+    w = next(n.id for n in lay.pages[0] if n.kind == "widget")
+    assert problems == [] and pos[w] == (0, 0, 2, 2)
+    assert pos["com.g.a0"] == (0, 2, 1, 1) and pos["com.g.a2"] == (1, 2, 1, 1) and pos["com.g.a4"] == (2, 0, 1, 1)
+    lay.pin("com.g.a5", 1, 23)                       # bottom-right corner
+    pos, problems = lay.place(lay.pages[0])
+    assert problems == [] and pos["com.g.a5"] == (5, 3, 1, 1)
+    lay.pin("com.g.a4", 1, 0)                        # a pinned app wins; the widget flows on
+    pos = lay.place(lay.pages[0])[0]
+    assert pos["com.g.a4"] == (0, 0, 1, 1) and pos[w][1] == 2
+    with pytest.raises(LayoutError):
+        lay.pin("com.g.a3", 1, 0)                    # two pins in one cell
+    lay.unpin("com.g.a4")
+    lay.pin(w, 1, 2)                                 # widget to the right half
+    assert lay.place(lay.pages[0])[0][w] == (0, 2, 2, 2)
+    lay.move("com.g.a5", "page:2")                   # moving drops the pin
+    assert "com.g.a5" not in lay.pins
+    lay.swap("com.g.a0", "com.g.a1")
+    assert lay.validate() == []
+    assert lay.diff()["gaps_changed"] == 1           # the widget pin
+
+
+def test_gaps_round_trip_dict_format(tmp_path):
+    from homescreen.device import to_root_archive, disk_pins
+    raw = plistlib.loads(IOS27.read_bytes())
+    path = tmp_path / "IconState.plist"
+    path.write_bytes(plistlib.dumps(raw))
+    s = Session(FileSource(path), tmp_path / "data")
+    asyncio.run(s.read())
+    s.edit(lambda lay: lay.pin("com.apple.MobileAddressBook", 2, 13))
+    tok = s.require().token()
+    s2 = Session(FileSource(path), tmp_path / "data")          # draft keeps the gap
+    assert s2.require().pins == {"com.apple.MobileAddressBook": 13} and s2.require().token() == tok
+    s.undo()
+    assert s.require().pins == {}
+    s.redo()
+    assert asyncio.run(s.apply(s.require().token()))["ok"]
+    written = plistlib.loads(path.read_bytes())
+    assert disk_pins(written) == {"com.apple.MobileAddressBook": 13}
+    asyncio.run(s.read())
+    assert s.require().pins == {"com.apple.MobileAddressBook": 13}   # read back from the file
+    # the phone payload carries page ids and listMetadata only when there are gaps
+    lay = s.require()
+    from homescreen.session import pins_by_page
+    out = to_root_archive(lay.to_state(), lay.to_library() or [], pins_by_page(lay))
+    pid = out["listUniqueIdentifiers"][1]
+    assert out["listMetadata"][pid]["fixedLocations"] == {"com.apple.MobileAddressBook": 13}
+    assert "listMetadata" not in to_root_archive(lay.to_state(), [], [{}, {}])
+
+
+def test_gaps_remembered_when_device_cannot_report_them(tmp_path):
+    """A real phone never reports gaps; gaps set in Homescreen must survive a re-read."""
+    path = tmp_path / "phone.plist"
+    path.write_bytes(plistlib.dumps(_gap_layout()))           # list format: no gap info
+    s = Session(FileSource(path), tmp_path / "data")
+    asyncio.run(s.read())
+    assert s.gaps_readable is False
+    s.edit(lambda lay: lay.pin("com.g.a5", 1, 23))
+    assert asyncio.run(s.apply(s.require().token()))["ok"]
+    asyncio.run(s.read())                                     # phone reports no gaps...
+    assert s.require().pins == {"com.g.a5": 23}               # ...but Homescreen remembers it
+    # a gap that no longer fits (page changed on the phone) is dropped, not forced
+    page = _gap_layout()
+    page[1] = page[1] + [{"bundleIdentifier": f"com.g.x{i}", "displayIdentifier": f"com.g.x{i}", "displayName": "X"} for i in range(13)]
+    path.write_bytes(plistlib.dumps(page))
+    asyncio.run(s.read())
+    assert s.require().validate() == []

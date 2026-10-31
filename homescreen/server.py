@@ -20,8 +20,9 @@ Item ids: apps use their bundle id; folders and widgets use folder:N / widget:N.
 Targets: 'dock', 'library', 'bank' (a holding tray; empty it before applying), 'page:N'
 (1-based; N = last+1 makes a new page), 'folder:<id>[:N]'.
 To take an app off the Home Screen, move it to 'library' (App Library only). Leaving it out
-does NOT work: iOS puts it back. Pages hold 24 slots; widgets take small=4, medium=8,
-large=16. Folders hold 9 per page. Leave page 1 and the dock alone unless asked: they are
+does NOT work: iOS puts it back. Pages hold 24 slots (6 rows x 4 columns); widgets take
+small=2x2, medium=4x2, large=4x4. place_at puts an item in an exact spot, leaving gaps; any move
+drops that. iOS doesn't report gaps made on the phone over USB, so those close on apply. Folders hold 9 per page. Leave page 1 and the dock alone unless asked: they are
 muscle memory. To sort by color, call icon_colors first; get_icons only for the few you
 can't judge."""
 
@@ -155,6 +156,19 @@ def app_store_categories(ids: list[str] | None = None) -> dict[str, str]:
     lay = session().require()
     ids = ids or [n.id for n in lay.nodes.values() if n.kind == "app"]
     return organize.fetch_categories(ids, DATA / "categories.json")
+
+
+@mcp.tool()
+def place_at(item_id: str, page: int, row: int, column: int) -> dict[str, Any]:
+    """Put an item in an exact spot (row 1-6, column 1-4) on a page, leaving empty spaces
+    around it, like dragging it to an empty spot on the iPhone. Other items flow around it."""
+    return _edit(lambda lay: lay.pin(item_id, page, (row - 1) * 4 + (column - 1)))
+
+
+@mcp.tool()
+def close_gaps(item_ids: list[str]) -> dict[str, Any]:
+    """Let placed items flow with the rest again (removes their gaps)."""
+    return _edit(lambda lay: [lay.unpin(i) for i in item_ids])
 
 
 @mcp.tool()

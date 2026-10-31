@@ -23,7 +23,9 @@ def _pages_from(lay: Layout, start: int) -> list[Node]:
 
 
 def pack(lay: Layout, items: list[Node], start_page: int = 0) -> None:
-    """Lay items out row by row from page start_page+1 on, starting a new page when one is full."""
+    """Lay items out row by row from page start_page+1 on, starting a new page when one is full.
+    Gaps on those pages are dropped: a sort re-flows them."""
+    lay.unpin_pages(start_page)
     kept = lay.pages[:start_page]
     pages: list[list[Node]] = [[]]
     used = 0

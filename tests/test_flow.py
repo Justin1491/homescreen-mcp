@@ -130,8 +130,8 @@ def test_draft_survives_restart(phone, tmp_path):
 class LossySource(FileSource):
     """Write raises after landing, like a dropped USB response."""
 
-    async def write(self, state, library):
-        await super().write(state, library)
+    async def write(self, state, library, pins=None):
+        await super().write(state, library, pins)
         raise ConnectionError("response lost")
 
 

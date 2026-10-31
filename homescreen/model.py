@@ -18,6 +18,8 @@ from typing import Any
 
 # Grid slots a widget takes on an iPhone page (4 columns x 6 rows = 24 slots).
 WIDGET_SLOTS = {"small": 4, "medium": 8, "large": 16, "extralarge": 32}
+WIDGET_DIMS = {"small": (2, 2), "medium": (4, 2), "large": (4, 4), "extralarge": (4, 4)}  # columns, rows
+GRID_COLS, GRID_ROWS = 4, 6
 DEFAULT_PAGE_SLOTS = 24
 DEFAULT_DOCK_SLOTS = 4
 DEFAULT_FOLDER_PAGE_SLOTS = 9
@@ -96,7 +98,8 @@ class Layout:
     def __init__(self, raw_state: list[Any], page_slots: int = DEFAULT_PAGE_SLOTS,
                  dock_slots: int = DEFAULT_DOCK_SLOTS, source: list[Any] | None = None,
                  library: list[Any] | None = None, source_library: list[Any] | None = None,
-                 bank: list[Any] | None = None):
+                 bank: list[Any] | None = None, pins: dict[str, int] | None = None,
+                 source_pins: dict[str, int] | None = None):
         """source / source_library: the state as read from the device, when raw_state is a saved draft.
 
         library: App Library-only apps (iOS stores these as "ignored"). None means the device
@@ -115,9 +118,98 @@ class Layout:
         self.library = None if library is None else [self._wrap(r, "library") for r in library]
         # App Bank: a draft-only tray for items set aside while rearranging. Never written.
         self.bank = [self._wrap(r, "bank") for r in bank or []]
+        # Gaps: items pinned to a grid cell (row * 4 + column) on their page. Unpinned items flow
+        # into the free cells in order, like iOS does. iOS doesn't report pins over USB.
+        self.pins: dict[str, int] = dict(pins or {})
+        self.source_pins: dict[str, int] = dict((pins if source is None else source_pins) or {})
 
     def original(self) -> "Layout":
-        return Layout(self.source, self.page_slots, self.dock_slots, library=self.source_library)
+        return Layout(self.source, self.page_slots, self.dock_slots, library=self.source_library,
+                      pins=self.source_pins)
+
+    # ---- grid / gaps ----------------------------------------------------------------
+
+    @staticmethod
+    def dims(n: Node) -> tuple[int, int]:
+        if n.kind == "widget":
+            return WIDGET_DIMS.get(str(n.raw.get("gridSize", "small")).lower(), (2, 2))
+        return (1, 1)
+
+    def place(self, page: list[Node]) -> tuple[dict[str, tuple[int, int, int, int]], list[str]]:
+        """Where each item lands on a page: {id: (row, col, width, height)} and any problems.
+        Pinned items take their cell first; the rest fill free cells in order, row by row,
+        widgets on column boundaries that fit their width."""
+        grid = [[None] * GRID_COLS for _ in range(GRID_ROWS)]
+        out: dict[str, tuple[int, int, int, int]] = {}
+        problems: list[str] = []
+
+        def fits(r: int, c: int, w: int, h: int) -> bool:
+            return r + h <= GRID_ROWS and c + w <= GRID_COLS and all(
+                grid[r + y][c + x] is None for y in range(h) for x in range(w))
+
+        def put(n: Node, r: int, c: int, w: int, h: int) -> None:
+            for y in range(h):
+                for x in range(w):
+                    grid[r + y][c + x] = n.id
+            out[n.id] = (r, c, w, h)
+
+        for n in sorted((n for n in page if n.id in self.pins), key=lambda n: self.pins[n.id]):
+            w, h = self.dims(n)
+            r, c = divmod(self.pins[n.id], GRID_COLS)
+            if fits(r, c, w, h):
+                put(n, r, c, w, h)
+            else:
+                problems.append(f"{n.name} can't be pinned at row {r + 1}, column {c + 1}")
+        for n in page:
+            if n.id in out or (n.id in self.pins and any(n.name in p for p in problems)):
+                continue
+            w, h = self.dims(n)
+            spot = next(((r, c) for r in range(GRID_ROWS) for c in range(0, GRID_COLS, w if w > 1 else 1)
+                         if fits(r, c, w, h)), None)
+            if spot:
+                put(n, *spot, w, h)
+            else:
+                problems.append(f"no room for {n.name}")
+        return out, problems
+
+    def pin(self, node_id: str, page: int, cell: int) -> None:
+        """Put an item at a grid cell (0-23, row by row) on a page, leaving gaps around it."""
+        node = self.get(node_id)
+        if node.kind not in ("app", "webclip", "folder", "widget"):
+            raise LayoutError(f"can't place {node.name} on the grid")
+        if not 0 <= cell < GRID_ROWS * GRID_COLS:
+            raise LayoutError("cells are 0-23")
+        target = self._target(f"page:{page}")
+        w, h = self.dims(node)
+        r, c = divmod(cell, GRID_COLS)
+        if r + h > GRID_ROWS or c + w > GRID_COLS:
+            raise LayoutError(f"{node.name} doesn't fit at row {r + 1}, column {c + 1}")
+        mine = {(r + y, c + x) for y in range(h) for x in range(w)}
+        for other in target:
+            if other.id != node_id and other.id in self.pins:
+                orow, ocol = divmod(self.pins[other.id], GRID_COLS)
+                ow, oh = self.dims(other)
+                if mine & {(orow + y, ocol + x) for y in range(oh) for x in range(ow)}:
+                    raise LayoutError(f"that spot is taken by {other.name}")
+        if node not in target:
+            self.move(node_id, f"page:{page}")
+        self.pins[node_id] = cell
+        problems = self.place(self.pages[page - 1])[1]
+        if problems:
+            raise LayoutError(f"page {page} has no room for that: {problems[0]}")
+
+    def unpin(self, node_id: str) -> None:
+        self.pins.pop(node_id, None)
+
+    def unpin_pages(self, start: int = 0) -> None:
+        """Forget the gaps on pages start+1 and later (sorts re-flow those pages)."""
+        on = {n.id for p in self.pages[start:] for n in p}
+        self.pins = {k: v for k, v in self.pins.items() if k not in on}
+
+    def tidy_pins(self) -> None:
+        """Pins only mean something for items on a page."""
+        on = {n.id for p in self.pages for n in p}
+        self.pins = {k: v for k, v in self.pins.items() if k in on}
 
     # ---- parsing / serializing -------------------------------------------------
 
@@ -276,6 +368,7 @@ class Layout:
             raise LayoutError(f"only apps go in the App Library, not a {node.kind}")
         src, i = self.locate(node_id)
         src.pop(i)
+        self.pins.pop(node_id, None)
         if before is not None:
             ids = [n.id for n in dest]
             if before not in ids:
@@ -297,6 +390,11 @@ class Layout:
             if self.library is not None and dest is self.library and node.kind not in ("app", "webclip"):
                 raise LayoutError(f"only apps go in the App Library, not a {node.kind}")
         ca[ia], cb[ib] = nb, na
+        pa, pb = self.pins.pop(a, None), self.pins.pop(b, None)
+        if pa is not None:
+            self.pins[b] = pa
+        if pb is not None:
+            self.pins[a] = pb
 
     def insert_page(self, at: int) -> None:
         """Add an empty page so it becomes page `at` (1-based)."""
@@ -319,6 +417,7 @@ class Layout:
             raise LayoutError("page isn't empty and this device has no App Library to send its apps to")
         if any(n.kind == "widget" for n in items):
             raise LayoutError("move or remove the widgets on this page first")
+        self.pins = {k: v for k, v in self.pins.items() if self.nodes[k] not in items}
         for n in list(items):
             for leaf in ([c for p in n.children for c in p] if n.kind == "folder" else [n]):
                 self.library.append(leaf)
@@ -331,6 +430,7 @@ class Layout:
             raise LayoutError(f"{folder_id} is not a folder")
         c, i = self.locate(folder_id)
         c[i:i + 1] = [x for p in folder.children for x in p]
+        self.pins.pop(folder_id, None)
 
     def create_folder(self, name: str, item_ids: list[str], target: str, index: int | None = None) -> str:
         if not item_ids:
@@ -384,11 +484,14 @@ class Layout:
             problems.append(f"only apps go in the App Library: {bad_lib}")
         if problems:
             raise LayoutError("; ".join(problems))
+        old_page = {n.id: k for k, p in enumerate(self.pages) for n in p}
         self.dock = [self.nodes[i] for i in dock]
         self.pages = [[self.nodes[i] for i in p] for p in pages]
         if self.library is not None:
             self.library = [self.nodes[i] for i in library]
         self.bank = [n for n in self.bank if n.id not in set(wanted)]
+        new_page = {i: k for k, p in enumerate(pages) for i in p}  # a pin survives only on the same page
+        self.pins = {k: v for k, v in self.pins.items() if old_page.get(k) == new_page.get(k) is not None}
 
     def drop_empty(self) -> None:
         for n in [*self.dock, *(x for p in self.pages for x in p)]:
@@ -399,6 +502,7 @@ class Layout:
             c, i = self.locate(f.id)
             c.pop(i)
         self.pages = [p for p in self.pages if p]
+        self.tidy_pins()
 
     # ---- checks -----------------------------------------------------------------
 
@@ -415,6 +519,8 @@ class Layout:
             used = sum(n.slots for n in page)
             if used > self.page_slots:
                 errs.append(f"page {i} needs {used} slots (max {self.page_slots})")
+            elif any(n.id in self.pins for n in page):
+                errs += [f"page {i}: {p}" for p in self.place(page)[1]]
             for n in page:
                 if n.kind == "folder":
                     for j, fp in enumerate(n.children, 1):
@@ -443,6 +549,9 @@ class Layout:
                     d["folder"] = [[{"id": c.id, "name": c.name} for c in p] for p in n.children]
                 elif n.kind == "widget":
                     d["widget"] = n.raw.get("gridSize", "?")
+                if n.id in self.pins:
+                    r, c = divmod(self.pins[n.id], GRID_COLS)
+                    d["placed_at"] = {"row": r + 1, "column": c + 1}
                 out.append(d)
             return out
 
@@ -522,6 +631,8 @@ class Layout:
             "pages_before": len(self.source) - 1,
             "pages_after": len(self.pages),
             "to_app_library": sum(1 for v in moved.values() if v.endswith("-> App Library")),
+            "gaps_changed": len({k for k in set(self.pins) | set(self.source_pins)
+                                 if self.pins.get(k) != self.source_pins.get(k)}),
             "moves": {f"{names[k]} [{k}]": v for k, v in sorted(moved.items(), key=lambda kv: kv[1])},
             "problems": self.validate(),
             "apply_token": self.token(),
@@ -529,7 +640,8 @@ class Layout:
 
     def token(self) -> str:
         """Short hash of the exact state that would be written."""
-        blob = plistlib.dumps({"state": self.to_state(), "library": self.to_library() or []},
+        blob = plistlib.dumps({"state": self.to_state(), "library": self.to_library() or [],
+                               "pins": {k: v for k, v in sorted(self.pins.items())}},
                               fmt=plistlib.FMT_BINARY, sort_keys=True)
         return "apply-" + hashlib.sha256(blob).hexdigest()[:10]
 

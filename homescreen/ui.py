@@ -49,6 +49,19 @@ def _item(n: Node, lay: Layout) -> dict[str, Any]:
     return d
 
 
+def _page(page: list[Node], lay: Layout) -> list[dict[str, Any]]:
+    pos, _ = lay.place(page)
+    out = []
+    for n in page:
+        d = _item(n, lay)
+        if n.id in pos:
+            d["pos"] = list(pos[n.id])
+        if n.id in lay.pins:
+            d["pinned"] = True
+        out.append(d)
+    return out
+
+
 def _usage_view(lay: Layout) -> dict[str, Any] | None:
     u = session().usage
     if u is None:
@@ -72,15 +85,16 @@ def view() -> dict[str, Any]:
         "source": s.source.name,
         "device": s.info,
         "dock": [_item(n, lay) for n in lay.dock],
-        "pages": [[_item(n, lay) for n in p] for p in lay.pages],
+        "pages": [_page(p, lay) for p in lay.pages],
         "library": None if lay.library is None else [_item(n, lay) for n in lay.library],
         "bank": [_item(n, lay) for n in lay.bank],
         "usage": _usage_view(lay),
         "moved": sorted(moved),
         "diff": {k: d[k] for k in ("items_moved", "to_app_library", "pages_before", "pages_after",
-                                   "problems", "apply_token")},
+                                   "problems", "apply_token", "gaps_changed")},
         "moves": d["moves"],
         "history": s.history(),
+        "gaps": {"readable": s.gaps_readable, "count": len(lay.pins), "changed": d["gaps_changed"]},
         "slots": {"page": lay.page_slots, "dock": lay.dock_slots},
     }
 
@@ -92,6 +106,8 @@ def _ops() -> dict[str, Callable[..., Callable[[Layout], Any]]]:
         "move": lambda id, target, index=None, before=None: lambda lay: lay.move(id, target, index, before),
         "move_many": lambda ids, target, before=None: lambda lay: [lay.move(i, target, None, before) for i in ids],
         "swap": lambda a, b: lambda lay: lay.swap(a, b),
+        "pin": lambda id, page, cell: lambda lay: lay.pin(id, page, cell),
+        "unpin": lambda ids: lambda lay: [lay.unpin(i) for i in ids],
         "create_folder": lambda name, ids, target, index=None: lambda lay: lay.create_folder(name, ids, target, index),
         "rename_folder": lambda id, name: lambda lay: lay.rename_folder(id, name),
         "dissolve_folder": lambda id: lambda lay: lay.dissolve_folder(id),

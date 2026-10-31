@@ -11,7 +11,9 @@ Free and open source. Runs entirely on your Mac. No account, no server, no jailb
 
 ## Features
 
-- **Drag-and-drop editor** with your phone's real icons, widgets at their real sizes, folders (several pages each), the dock, and page add/move/delete.
+- **Drag-and-drop editor** on the real 4×6 grid: your phone's real icons, widgets at their real sizes, folders (several pages each), the dock, and page add/move/delete.
+- **Gaps (empty spaces).** Drop an app on any empty spot to place it exactly there. Homescreen writes the gap to the phone and remembers it, so it survives later edits.
+- **Widgets keep their settings** (which script, which person, which city) through every apply.
 - **App Library that stays put.** Apps you keep only in the App Library stay there when you apply, and you can drag apps into or out of it. Most tools get this wrong ([why](#why-other-tools-dump-app-library-apps-onto-your-home-screen)).
 - **App Bank** to park apps, folders or widgets while you rearrange.
 - **One-click organizing:**
@@ -104,11 +106,20 @@ Keys it leaves out (Today View, page IDs) keep their values on the phone. Any in
 
 Data (drafts, backups, icon cache) lives in `~/Library/Application Support/homescreen-mcp`.
 
+## Gaps and hidden pages: what iOS allows over USB
+
+- **iOS stores gaps as pinned cells for each page** (`listMetadata` → `fixedLocations`), keyed by page ID.
+- **Writing gaps works.** Homescreen sends page IDs plus the pins and verifies the result. Tested on iOS 27.0.1 and the iOS 27.2 simulator.
+- **Reading them doesn't.** None of SpringBoard's USB exports (`getIconState` in any `formatVersion`) includes gaps or hidden pages. They only return the order of icons. And a write without them clears every gap, even on pages nobody touched.
+- **What that means in practice:**
+  - **Gaps set in Homescreen** are remembered for each phone and sent with every write, so they last.
+  - **Gaps made on the iPhone itself** can't be seen, so they close on the first apply. Recreate them in Homescreen (drop the app on that spot); the Apply screen warns about this.
+  - **Hidden pages** are likewise invisible over USB. Unhide them before applying.
+
 ## Limitations
 
-- Hidden pages can't be detected (see above).
+- Hidden pages and gaps made on the phone itself can't be read (see above).
 - Assumes the iPhone grid: 4×6 pages and a 4-icon dock. iPad isn't supported yet.
-- Free-form icon placement (gaps) isn't supported; icons fill row by row.
 - A few system apps that iOS never shows on the Home Screen are listed in `NEVER_ON_HOME_SCREEN` (`homescreen/device.py`). If a write reports one under `added_by_ios`, add it there.
 
 ## Development
