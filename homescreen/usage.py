@@ -1,0 +1,156 @@
+"""Screen Time usage from this Mac, and page-swipe estimates.
+
+With Screen Time's "Share Across Devices" on, macOS keeps the iPhone's app-focus history in
+Biome: ~/Library/Biome/streams/restricted/App.InFocus/remote/<device>/<file>. Files are SEGB
+logs named by their start time (microseconds since 2001-01-01); each record holds the bundle id
+of the app in focus. Reading them needs Full Disk Access for the app running this code.
+
+We don't decode the records fully. Each app session shows up as a pair of records (start, end)
+carrying its bundle id, so counting bundle-id occurrences per file and halving gives "opens".
+That's an estimate, good for ranking apps, which is all the optimizer needs.
+"""
+
+from __future__ import annotations
+
+import re
+import time
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+from .model import Layout, Node
+
+BIOME = Path.home() / "Library/Biome/streams/restricted/App.InFocus/remote"
+MAC_EPOCH = 978307200  # 2001-01-01 in Unix time
+BUNDLE_RE = re.compile(rb"[A-Za-z0-9][A-Za-z0-9_\-]*(?:\.[A-Za-z0-9_\-]+){1,}")
+
+
+def _file_time(p: Path) -> float | None:
+    try:
+        return int(p.name) / 1e6 + MAC_EPOCH
+    except ValueError:
+        return None
+
+
+def _counts(files: list[Path], known: set[str]) -> Counter:
+    c: Counter = Counter()
+    for f in files:
+        for m in BUNDLE_RE.findall(f.read_bytes()):
+            s = m.decode("ascii", "ignore")
+            # a protobuf field tag can follow the string with no separator; trim one char if needed
+            if s in known:
+                c[s] += 1
+            elif s[:-1] in known:
+                c[s[:-1]] += 1
+    return c
+
+
+def load(known: set[str], days: int = 30, root: Path = BIOME) -> dict[str, Any]:
+    """App opens per bundle id over the last `days`, from the synced device(s) whose apps best
+    match `known` (the apps on the phone being arranged)."""
+    if not root.exists():
+        return {"ok": False, "error": "No synced Screen Time data on this Mac. Turn on Screen Time > "
+                "Share Across Devices on both the iPhone and the Mac (same Apple Account)."}
+    since = time.time() - days * 86400
+    devices = []
+    try:
+        dirs = [d for d in root.iterdir() if d.is_dir()]
+    except PermissionError:
+        return {"ok": False, "error": "macOS blocked access to Screen Time data. Give your terminal (or the "
+                "app running Homescreen) Full Disk Access in System Settings > Privacy & Security."}
+    for d in dirs:
+        files = [f for f in d.iterdir() if f.is_file() and (_file_time(f) or 0) >= since]
+        if not files:
+            continue
+        c = _counts(files, known)
+        if c:
+            devices.append({"id": d.name, "apps": len(c), "events": sum(c.values()), "counts": c,
+                            "last": max(_file_time(f) or 0 for f in files)})
+    if not devices:
+        return {"ok": False, "error": f"No Screen Time data from this iPhone in the last {days} days."}
+    # one phone can appear under several device ids (e.g. after an iOS update); merge every
+    # device that looks like the same phone: at least half the apps of the best match
+    devices.sort(key=lambda d: d["apps"], reverse=True)
+    best = devices[0]["apps"]
+    used = [d for d in devices if d["apps"] >= best / 2]
+    total: Counter = Counter()
+    for d in used:
+        total.update(d["counts"])
+    opens = {b: max(1, round(n / 2)) for b, n in total.items()}
+    return {"ok": True, "days": days, "opens": opens,
+            "devices": [{k: d[k] for k in ("id", "apps", "events", "last")} for d in used]}
+
+
+# ---- swipes -----------------------------------------------------------------------------
+
+def _app_positions(lay: Layout) -> dict[str, int]:
+    """Swipes to reach each app from page 1: page N costs N-1, a folder's page K adds K-1,
+    the dock is free, an App Library-only app costs one swipe past the last page."""
+    cost: dict[str, int] = {}
+    for n in lay.dock:
+        for leaf in _leaves(n):
+            cost[leaf.bundle_id or leaf.id] = 0
+    for i, page in enumerate(lay.pages):
+        for n in page:
+            if n.kind == "folder":
+                for k, fp in enumerate(n.children):
+                    for c in fp:
+                        cost[c.bundle_id or c.id] = i + k
+            elif n.kind in ("app", "webclip"):
+                cost[n.bundle_id or n.id] = i
+    for n in lay.library or []:
+        cost[n.bundle_id or n.id] = len(lay.pages)
+    return cost
+
+
+def _leaves(n: Node) -> list[Node]:
+    return [c for p in n.children for c in p] if n.kind == "folder" else [n]
+
+
+def swipes(lay: Layout, opens: dict[str, int]) -> int:
+    cost = _app_positions(lay)
+    return sum(opens.get(b, 0) * c for b, c in cost.items())
+
+
+def top_apps(lay: Layout, opens: dict[str, int], n: int = 25) -> list[dict[str, Any]]:
+    names = {x.bundle_id: x.name for x in lay.nodes.values() if x.bundle_id}
+    pos = lay.positions()
+    ranked = sorted(((b, c) for b, c in opens.items() if b in names), key=lambda kv: -kv[1])[:n]
+    return [{"id": b, "name": names[b], "opens": c, "where": pos.get(b, "")} for b, c in ranked]
+
+
+# ---- optimizer --------------------------------------------------------------------------
+
+def optimize(lay: Layout, opens: dict[str, int], keep_first_page: bool = False) -> dict[str, Any]:
+    """Put the most-opened apps and folders on the earliest pages (row by row) and the most
+    opened apps on each folder's first page. Widgets stay on their pages; the dock and the
+    App Library aren't touched. Returns the swipe estimate before and after."""
+    before = swipes(lay, opens)
+    score = lambda n: sum(opens.get(c.bundle_id or c.id, 0) for c in _leaves(n))
+    for n in list(lay.nodes.values()):  # folder contents first, so folder scores stay the same
+        if n.kind == "folder":
+            items = sorted(_leaves(n), key=lambda c: -opens.get(c.bundle_id or c.id, 0))
+            n.children = [items[i:i + 9] for i in range(0, len(items), 9)] or [[]]
+    start = 1 if keep_first_page and lay.pages else 0
+    pages = lay.pages[start:]
+    widgets = [[x for x in p if x.kind == "widget"] for p in pages]
+    movable = sorted((x for p in pages for x in p if x.kind != "widget"), key=lambda n: -score(n))
+    out: list[list[Node]] = []
+    i = 0
+    for k in range(max(len(pages), 1)):
+        page = list(widgets[k]) if k < len(widgets) else []
+        used = sum(x.slots for x in page)
+        while i < len(movable) and used + movable[i].slots <= lay.page_slots:
+            page.append(movable[i])
+            used += movable[i].slots
+            i += 1
+        out.append(page)
+    while i < len(movable):  # anything left gets new pages
+        page, used = [], 0
+        while i < len(movable) and used + movable[i].slots <= lay.page_slots:
+            page.append(movable[i])
+            used += movable[i].slots
+            i += 1
+        out.append(page)
+    lay.pages = lay.pages[:start] + [p for p in out if p]
+    return {"swipes_before": before, "swipes_after": swipes(lay, opens)}
