@@ -331,3 +331,22 @@ def test_hidden_webclips_are_learned_and_kept_in_app_library(tmp_path):
     s.edit(lambda lay: lay.move("com.w.a4", "library"))  # frees another cell
     assert asyncio.run(s.apply(s.require().token()))["ok"]
     assert all(x["displayIdentifier"] != "C5066B8C" for p in phone.state for x in p)
+
+
+def test_ipad_grid_from_icon_metrics():
+    from homescreen.model import Grid
+    g = Grid.from_metrics({"homeScreenIconColumns": 5, "homeScreenIconRows": 6, "homeScreenIconDockMaxCount": 26,
+                           "homeScreenIconFolderColumns": 4, "homeScreenIconFolderRows": 4})
+    assert (g.cols, g.rows, g.slots, g.dock, g.folder) == (5, 6, 30, 26, 16)
+    assert Grid.from_metrics(None) == Grid()  # no metrics: iPhone
+    a = lambda i: {"bundleIdentifier": f"com.p.a{i}", "displayIdentifier": f"com.p.a{i}", "displayName": f"A{i}"}
+    big = {"iconType": "custom", "gridSize": "large", "displayName": "Big", "uniqueIdentifier": "W1"}
+    state = [[a(i) for i in range(7)], [big] + [a(i) for i in range(7, 21)]]  # 16 + 14 = 30 slots
+    assert Layout(state).validate()  # too full for an iPhone page
+    lay = Layout(state, grid=g)
+    assert lay.validate() == [] and lay.page_slots == 30
+    pos, problems = lay.place(lay.pages[0])
+    assert not problems and pos["widget:W1"] == (0, 0, 4, 4) and pos["com.p.a7"] == (0, 4, 1, 1)  # 5th column
+    lay.create_folder("F", [f"com.p.a{i}" for i in range(7, 21)], "page:1")
+    lay.refold(lay.pages[0][-1])
+    assert [len(p) for p in lay.pages[0][-1].children] == [14]  # 16 per folder page

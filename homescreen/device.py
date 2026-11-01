@@ -178,6 +178,7 @@ def model_to_disk(state: list[Any], library: list[Any] | None, base: dict[str, A
 NEVER_ON_HOME_SCREEN = {
     "com.apple.FTMInternal", "com.apple.Posters.ImagePlaygroundPosterApp", "com.apple.PreviewShell",
     "com.apple.TVRemoteApp", "com.apple.sidecar", "com.apple.webapp",
+    "com.apple.appleseed.FeedbackAssistant",  # iOS 26.6.2 keeps it in the App Library
 }
 
 

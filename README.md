@@ -121,7 +121,7 @@ Data (drafts, backups, icon cache) lives in `~/Library/Application Support/homes
 ## Limitations
 
 - Hidden pages and gaps made on the phone itself can't be read (see above).
-- Assumes the iPhone grid: 4×6 pages and a 4-icon dock. iPad isn't supported yet.
+- **iPad is early.** The grid, dock size and folder size come from the device (an iPad Air 13" reports 5×6, a 26-app dock and 16 per folder page), and arranging through MCP or the CLI works (tested on iPadOS 26.6.2). The editor still draws an iPhone grid. iPad widget sizes don't map onto the icon grid like iPhone ones, so a widget page is only accepted when it keeps the shape iPadOS gave it.
 - A few system apps that iOS never shows on the Home Screen are listed in `NEVER_ON_HOME_SCREEN` (`homescreen/device.py`). If a write reports one under `added_by_ios`, add it there.
 
 ## Development

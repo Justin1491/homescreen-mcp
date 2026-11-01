@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 from . import colors
 from .device import Source
-from .model import Layout, LayoutError, Node, structure
+from .model import Grid, Layout, LayoutError, Node, structure
 
 KEEP_READS = 10
 MAX_UNDO = 200
@@ -102,11 +102,12 @@ def node_pins(lay: Layout, keyed: dict[str, int], by_memory: bool = False) -> di
     return wanted
 
 
-def placed_structure(state: list[Any], library: list[Any] | None, keyed_pins: dict[str, int] | None) -> str:
+def placed_structure(state: list[Any], library: list[Any] | None, keyed_pins: dict[str, int] | None,
+                     grid: Grid | None = None) -> str:
     """Like model.structure, but each page lists its items in grid order (row by row) after
     gaps are applied. iOS reorders a page's list by position when it has gaps, so list order
     alone would report a correct write as a mismatch."""
-    lay = Layout(state, library=library)
+    lay = Layout(state, library=library, grid=grid)
     if keyed_pins:
         node_pins(lay, keyed_pins)
     pages = []
@@ -138,6 +139,7 @@ class Session:
         self.layout: Layout | None = None
         self.device_id: str | None = None
         self.info: dict[str, Any] = {}
+        self.grid = Grid()
         self.usage: dict[str, Any] | None = None  # Screen Time opens, loaded on request
         self._undo: list[tuple[Any, ...]] = []
         self._redo: list[tuple[Any, ...]] = []
@@ -158,7 +160,8 @@ class Session:
         assert self.layout is not None
         blob = {"device": self.device_id, "info": self.info, "source": self.layout.source, "state": self.layout.to_state(),
                 "source_library": self.layout.source_library, "library": self.layout.to_library(),
-                "bank": self.layout.to_bank(), "pins": self.layout.pins, "source_pins": self.layout.source_pins}
+                "bank": self.layout.to_bank(), "pins": self.layout.pins, "source_pins": self.layout.source_pins,
+                "grid": self.grid.to_dict()}
         blob = {k: v for k, v in blob.items() if v is not None}  # plists have no null
         self.draft_path.write_bytes(plistlib.dumps(blob, fmt=plistlib.FMT_BINARY))
 
@@ -167,9 +170,10 @@ class Session:
             blob = plistlib.loads(self.draft_path.read_bytes())
             self.device_id = blob["device"]
             self.info = blob.get("info", {})
+            self.grid = Grid(**blob["grid"]) if "grid" in blob else Grid()
             self.layout = Layout(blob["state"], source=blob["source"], library=blob.get("library"),
                                  source_library=blob.get("source_library"), bank=blob.get("bank"),
-                                 pins=blob.get("pins"), source_pins=blob.get("source_pins"))
+                                 pins=blob.get("pins"), source_pins=blob.get("source_pins"), grid=self.grid)
 
     def require(self) -> Layout:
         if self.layout is None:
@@ -190,7 +194,7 @@ class Session:
         lay = self.require()
         self.layout = Layout(snap[0], lay.page_slots, lay.dock_slots, source=lay.source,
                              library=snap[1], source_library=lay.source_library, bank=snap[2],
-                             pins=snap[3], source_pins=lay.source_pins)
+                             pins=snap[3], source_pins=lay.source_pins, grid=lay.grid)
 
     def edit(self, fn: Callable[[Layout], Any]) -> Any:
         """Run fn on the draft as one undoable step. If it raises, the draft is left untouched."""
@@ -317,13 +321,13 @@ class Session:
 
     def _layout_from(self, state: list[Any], library: list[Any] | None) -> Layout:
         """A Layout with gaps: from the source when it can report them, else from memory."""
-        lay = Layout(state, library=library)
+        lay = Layout(state, library=library, grid=self.grid)
         reported = getattr(self.source, "pins", None)
         if reported is not None:
             node_pins(lay, reported)
         elif self._gaps_path.exists():
             node_pins(lay, json.loads(self._gaps_path.read_text()), by_memory=True)
-        return Layout(state, library=library, pins=lay.pins)
+        return Layout(state, library=library, pins=lay.pins, grid=self.grid)
 
     @property
     def gaps_readable(self) -> bool:
@@ -333,6 +337,7 @@ class Session:
         info = await self.source.info()
         self.device_id = info.get("UniqueDeviceID") or self.source.name
         self.info = {k: v for k, v in info.items() if k in ("DeviceName", "ProductType", "ProductVersion")}
+        self.grid = Grid.from_metrics(info.get("icon_metrics"))
         state, library = await self._read_source()
         reads = self._dev_dir("reads")
         (reads / f"{_stamp()}.plist").write_bytes(_pack(state, library))
@@ -398,8 +403,8 @@ class Session:
             want_pins = {k: v for page in pins or [] for k, v in page.items()}
             got_pins = getattr(self.source, "pins", None)
             landed = (placed_structure(after, after_lib if lib_known else None,
-                                       want_pins if got_pins is None else got_pins)
-                      == placed_structure(target, target_lib, want_pins))
+                                       want_pins if got_pins is None else got_pins, self.grid)
+                      == placed_structure(target, target_lib, want_pins, self.grid))
             return {"ok": landed, "backup": backup.name,
                     "error": f"write call failed ({e}); re-read shows the new layout "
                              f"{'DID' if landed else 'did NOT'} land. Not retrying."}
@@ -408,14 +413,14 @@ class Session:
         # the phone can't report gaps; there the written gaps are taken as given and the order checked
         got_pins = getattr(self.source, "pins", None)
         got_pins = want_pins if got_pins is None else got_pins
-        ok = (placed_structure(after, after_lib if lib_known else None, got_pins)
-              == placed_structure(target, target_lib, want_pins))
+        ok = (placed_structure(after, after_lib if lib_known else None, got_pins, self.grid)
+              == placed_structure(target, target_lib, want_pins, self.grid))
         res: dict[str, Any] = {"ok": ok, "backup": backup.name}
         if after_lib is not None:
             res["app_library_only"] = len(after_lib)
         if not ok:
-            want = Layout(target, library=target_lib)
-            got = Layout(after, library=after_lib if lib_known else None)
+            want = Layout(target, library=target_lib, grid=self.grid)
+            got = Layout(after, library=after_lib if lib_known else None, grid=self.grid)
             wp, gp = want.positions(), got.positions()
             res["mismatches"] = {
                 "added_by_ios": sorted(set(gp) - set(wp)),
@@ -433,7 +438,7 @@ class Session:
                                "remembered now: move them to the App Library and apply again.")
         if ok:
             # remember the gaps that were just written (the phone won't report them back)
-            written = Layout(after, library=after_lib)
+            written = Layout(after, library=after_lib, grid=self.grid)
             node_pins(written, {k: v for page in pins or [] for k, v in page.items()})
             self._remember_gaps(written)
         self.layout = self._layout_from(after, after_lib)

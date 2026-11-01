@@ -25,6 +25,36 @@ DEFAULT_DOCK_SLOTS = 4
 DEFAULT_FOLDER_PAGE_SLOTS = 9
 
 
+@dataclass(frozen=True)
+class Grid:
+    """A device's Home Screen grid. iPhone: 4 x 6, 9 per folder page, 4 in the dock. iPads differ
+    (e.g. 5 x 6, 16 per folder page, a larger dock), and report it in their icon metrics."""
+    cols: int = GRID_COLS
+    rows: int = GRID_ROWS
+    dock: int = DEFAULT_DOCK_SLOTS
+    folder: int = DEFAULT_FOLDER_PAGE_SLOTS
+
+    @property
+    def slots(self) -> int:
+        return self.cols * self.rows
+
+    @classmethod
+    def from_metrics(cls, m: dict[str, Any] | None) -> "Grid":
+        m = m or {}
+        try:
+            return cls(int(m["homeScreenIconColumns"]), int(m["homeScreenIconRows"]),
+                       int(m.get("homeScreenIconDockMaxCount", DEFAULT_DOCK_SLOTS)),
+                       int(m.get("homeScreenIconFolderColumns", 3)) * int(m.get("homeScreenIconFolderRows", 3)))
+        except (KeyError, TypeError, ValueError):
+            return cls()
+
+    def to_dict(self) -> dict[str, int]:
+        return {"cols": self.cols, "rows": self.rows, "dock": self.dock, "folder": self.folder}
+
+
+IPHONE = Grid()
+
+
 class LayoutError(ValueError):
     """An edit that would produce an invalid or lossy layout."""
 
@@ -99,7 +129,7 @@ class Layout:
                  dock_slots: int = DEFAULT_DOCK_SLOTS, source: list[Any] | None = None,
                  library: list[Any] | None = None, source_library: list[Any] | None = None,
                  bank: list[Any] | None = None, pins: dict[str, int] | None = None,
-                 source_pins: dict[str, int] | None = None):
+                 source_pins: dict[str, int] | None = None, grid: Grid | None = None):
         """source / source_library: the state as read from the device, when raw_state is a saved draft.
 
         library: App Library-only apps (iOS stores these as "ignored"). None means the device
@@ -107,8 +137,9 @@ class Layout:
         """
         if not isinstance(raw_state, list) or not raw_state:
             raise LayoutError("icon state must be a non-empty list (dock, then pages)")
-        self.page_slots = page_slots
-        self.dock_slots = dock_slots
+        self.grid = grid or IPHONE
+        self.page_slots = self.grid.slots if grid else page_slots
+        self.dock_slots = self.grid.dock if grid else dock_slots
         self.source = copy.deepcopy(raw_state if source is None else source)
         self.source_library = copy.deepcopy(library if source is None else source_library)
         self._counter: dict[str, int] = {}
@@ -125,7 +156,13 @@ class Layout:
 
     def original(self) -> "Layout":
         return Layout(self.source, self.page_slots, self.dock_slots, library=self.source_library,
-                      pins=self.source_pins)
+                      pins=self.source_pins, grid=self.grid)
+
+    def refold(self, folder: Node, items: list[Node] | None = None) -> None:
+        """Lay a folder's items (or the given ones) out in full folder pages."""
+        items = [c for p in folder.children for c in p] if items is None else items
+        k = self.grid.folder
+        folder.children = [items[i:i + k] for i in range(0, len(items), k)] or [[]]
 
     # ---- grid / gaps ----------------------------------------------------------------
 
@@ -139,12 +176,12 @@ class Layout:
         """Where each item lands on a page: {id: (row, col, width, height)} and any problems.
         Pinned items take their cell first; the rest fill free cells in order, row by row,
         widgets on column boundaries that fit their width."""
-        grid = [[None] * GRID_COLS for _ in range(GRID_ROWS)]
+        grid = [[None] * self.grid.cols for _ in range(self.grid.rows)]
         out: dict[str, tuple[int, int, int, int]] = {}
         problems: list[str] = []
 
         def fits(r: int, c: int, w: int, h: int) -> bool:
-            return r + h <= GRID_ROWS and c + w <= GRID_COLS and all(
+            return r + h <= self.grid.rows and c + w <= self.grid.cols and all(
                 grid[r + y][c + x] is None for y in range(h) for x in range(w))
 
         def put(n: Node, r: int, c: int, w: int, h: int) -> None:
@@ -155,7 +192,7 @@ class Layout:
 
         for n in sorted((n for n in page if n.id in self.pins), key=lambda n: self.pins[n.id]):
             w, h = self.dims(n)
-            r, c = divmod(self.pins[n.id], GRID_COLS)
+            r, c = divmod(self.pins[n.id], self.grid.cols)
             if fits(r, c, w, h):
                 put(n, r, c, w, h)
             else:
@@ -164,7 +201,7 @@ class Layout:
             if n.id in out or (n.id in self.pins and any(n.name in p for p in problems)):
                 continue
             w, h = self.dims(n)
-            spot = next(((r, c) for r in range(GRID_ROWS) for c in range(0, GRID_COLS, w if w > 1 else 1)
+            spot = next(((r, c) for r in range(self.grid.rows) for c in range(0, self.grid.cols, w if w > 1 else 1)
                          if fits(r, c, w, h)), None)
             if spot:
                 put(n, *spot, w, h)
@@ -173,21 +210,21 @@ class Layout:
         return out, problems
 
     def pin(self, node_id: str, page: int, cell: int) -> None:
-        """Put an item at a grid cell (0-23, row by row) on a page, leaving gaps around it."""
+        """Put an item at a grid cell (0 to cols*rows-1, row by row) on a page, leaving gaps around it."""
         node = self.get(node_id)
         if node.kind not in ("app", "webclip", "folder", "widget"):
             raise LayoutError(f"can't place {node.name} on the grid")
-        if not 0 <= cell < GRID_ROWS * GRID_COLS:
-            raise LayoutError("cells are 0-23")
+        if not 0 <= cell < self.grid.rows * self.grid.cols:
+            raise LayoutError(f"cells are 0-{self.grid.slots - 1}")
         target = self._target(f"page:{page}")
         w, h = self.dims(node)
-        r, c = divmod(cell, GRID_COLS)
-        if r + h > GRID_ROWS or c + w > GRID_COLS:
+        r, c = divmod(cell, self.grid.cols)
+        if r + h > self.grid.rows or c + w > self.grid.cols:
             raise LayoutError(f"{node.name} doesn't fit at row {r + 1}, column {c + 1}")
         mine = {(r + y, c + x) for y in range(h) for x in range(w)}
         for other in target:
             if other.id != node_id and other.id in self.pins:
-                orow, ocol = divmod(self.pins[other.id], GRID_COLS)
+                orow, ocol = divmod(self.pins[other.id], self.grid.cols)
                 ow, oh = self.dims(other)
                 if mine & {(orow + y, ocol + x) for y in range(oh) for x in range(ow)}:
                     raise LayoutError(f"that spot is taken by {other.name}")
@@ -513,19 +550,24 @@ class Layout:
             errs.append(f"the App Bank still holds {len(self.bank)} item(s); place them or send them to the App Library")
         if len(self.dock) > self.dock_slots:
             errs.append(f"dock has {len(self.dock)} items (max {self.dock_slots})")
+        # a page shaped as the device laid it out (same widgets in the same places, the same number
+        # of single-cell items) is trusted: iPad widget sizes don't map onto the icon grid the way
+        # iPhone ones do, so a widget page can look "too full" here
+        shape = lambda p: tuple(n.id if n.kind == "widget" else 1 for n in p)
+        as_read = {shape(p) for p in self.original().pages}
         for i, page in enumerate(self.pages, 1):
             if not page:
                 errs.append(f"page {i} is empty (iOS keeps it as a blank page; use remove_empty)")
             used = sum(n.slots for n in page)
-            if used > self.page_slots:
+            if used > self.page_slots and shape(page) not in as_read:
                 errs.append(f"page {i} needs {used} slots (max {self.page_slots})")
             elif any(n.id in self.pins for n in page):
                 errs += [f"page {i}: {p}" for p in self.place(page)[1]]
             for n in page:
                 if n.kind == "folder":
                     for j, fp in enumerate(n.children, 1):
-                        if len(fp) > DEFAULT_FOLDER_PAGE_SLOTS:
-                            errs.append(f"folder {n.name!r} page {j} has {len(fp)} items (max 9)")
+                        if len(fp) > self.grid.folder:
+                            errs.append(f"folder {n.name!r} page {j} has {len(fp)} items (max {self.grid.folder})")
                         if any(c.kind in ("folder", "widget") for c in fp):
                             errs.append(f"folder {n.name!r} contains a folder or widget")
         before = sorted(self.original().leaf_ids())
@@ -550,7 +592,7 @@ class Layout:
                 elif n.kind == "widget":
                     d["widget"] = n.raw.get("gridSize", "?")
                 if n.id in self.pins:
-                    r, c = divmod(self.pins[n.id], GRID_COLS)
+                    r, c = divmod(self.pins[n.id], self.grid.cols)
                     d["placed_at"] = {"row": r + 1, "column": c + 1}
                 out.append(d)
             return out

@@ -65,11 +65,11 @@ def alphabetical(lay: Layout, keep_first_page: bool = True, folders_first: bool 
 
 
 def sort_folder_contents(lay: Layout) -> None:
-    """A-Z inside every folder, refilled 9 per folder page."""
+    """A-Z inside every folder, refilled in full folder pages."""
     for n in list(lay.nodes.values()):
         if n.kind == "folder" and n.id in {x.id for p in lay.pages for x in p} | {x.id for x in lay.dock}:
             items = sorted((c for p in n.children for c in p), key=lambda c: c.name.lower())
-            n.children = [items[i:i + 9] for i in range(0, len(items), 9)] or [[]]
+            lay.refold(n, items)
 
 
 def into_folders(lay: Layout, groups: dict[str, list[str]], keep_first_page: bool = True,
@@ -97,7 +97,7 @@ def into_folders(lay: Layout, groups: dict[str, list[str]], keep_first_page: boo
         else:
             for i in ids:
                 page = folder.children[-1] if folder.children else None
-                if page is None or len(page) >= 9:
+                if page is None or len(page) >= lay.grid.folder:
                     folder.children.append([])
                 lay.move(i, f"{folder.id}:{len(folder.children)}")
         filed[folder.name] = [lay.nodes[i].name for i in ids]

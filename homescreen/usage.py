@@ -130,7 +130,7 @@ def optimize(lay: Layout, opens: dict[str, int], keep_first_page: bool = False) 
     for n in list(lay.nodes.values()):  # folder contents first, so folder scores stay the same
         if n.kind == "folder":
             items = sorted(_leaves(n), key=lambda c: -opens.get(c.bundle_id or c.id, 0))
-            n.children = [items[i:i + 9] for i in range(0, len(items), 9)] or [[]]
+            lay.refold(n, items)
     start = 1 if keep_first_page and lay.pages else 0
     lay.unpin_pages(start)
     pages = lay.pages[start:]
