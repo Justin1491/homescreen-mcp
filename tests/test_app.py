@@ -281,3 +281,53 @@ def test_gaps_remembered_when_device_cannot_report_them(tmp_path):
     path.write_bytes(plistlib.dumps(page))
     asyncio.run(s.read())
     assert s.require().validate() == []
+
+
+class HiddenWebClipPhone:
+    """Like a real phone: the App Library is worked out from installed apps (so web clips in it
+    are never reported), and a write puts any web clip it wasn't told about into a free cell."""
+    name = "hidden-webclip-phone"
+    pins = None
+
+    def __init__(self, state, hidden):
+        self.state, self.hidden, self.writes, self.apps = state, hidden, 0, []
+
+    async def info(self):
+        return {"DeviceName": "fake", "UniqueDeviceID": self.name}
+
+    async def read(self):
+        return [list(p) for p in self.state], list(self.apps)  # installed apps only
+
+    async def write(self, state, library, pins=None):
+        self.writes += 1
+        listed = {x.get("displayIdentifier") for x in library}
+        state = [list(p) for p in state]
+        for w in [w for w in self.hidden if w["displayIdentifier"] not in listed]:
+            self.hidden.remove(w)
+            state[-1].append(w)  # first free cell
+        for x in library:
+            if x.get("webClipURL") and x not in self.hidden:
+                self.hidden.append({k: x[k] for k in ("displayIdentifier", "displayName", "webClipURL")})
+        self.apps = [x for x in library if not x.get("webClipURL")]
+        self.state = [[x for x in p if x.get("displayIdentifier") not in listed] for p in state]
+
+
+def test_hidden_webclips_are_learned_and_kept_in_app_library(tmp_path):
+    a = lambda i: {"bundleIdentifier": f"com.w.a{i}", "displayIdentifier": f"com.w.a{i}", "displayName": f"A{i}"}
+    clip = {"displayIdentifier": "C5066B8C", "displayName": "Odds", "webClipURL": "/"}
+    phone = HiddenWebClipPhone([[a(0)], [a(i) for i in range(1, 6)]], [dict(clip)])
+    s = Session(phone, tmp_path / "data")
+    asyncio.run(s.read())
+    s.edit(lambda lay: lay.move("com.w.a5", "library"))
+    res = asyncio.run(s.apply(s.require().token()))
+    assert not res["ok"] and res["hidden_webclips"] == ["Odds"]  # iOS surfaced it; reported, not retried
+    assert phone.writes == 1
+    # it's remembered: send it to the App Library, and later writes keep it there
+    s.edit(lambda lay: lay.move("C5066B8C", "library"))
+    res = asyncio.run(s.apply(s.require().token()))
+    assert res["ok"], res
+    asyncio.run(s.read())
+    assert "C5066B8C" in [n.id for n in s.require().library]
+    s.edit(lambda lay: lay.move("com.w.a4", "library"))  # frees another cell
+    assert asyncio.run(s.apply(s.require().token()))["ok"]
+    assert all(x["displayIdentifier"] != "C5066B8C" for p in phone.state for x in p)

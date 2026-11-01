@@ -86,6 +86,8 @@ Found by reading SpringBoard's code in the iOS 27.2 simulator, then confirmed on
 
 **Widgets keep their settings.** A configured widget (which script, which person, which city) is linked to its settings by an element ID. Over USB that ID only appears as `userSelectedElementIdentifier`. Writing a widget without it as `uniqueIdentifier` makes SpringBoard save the widget with no ID, and its settings are orphaned. Homescreen sends it back, and remembers each widget's ID across reads in case iOS drops one. Verified on iOS 27.0.1: a configured Scriptable widget kept its script through a write.
 
+**Web clips in the App Library.** Web clips aren't installed apps, so the installed-app list can't put them in `ignored`, and USB never reports them. A write that leaves one out makes iOS put it in the first free spot on a page. Homescreen remembers every web clip it has seen on each phone and sends it in `ignored`. If iOS surfaces one it has never reported, the apply result names it (`hidden_webclips`); move it to the App Library and apply again. Found on iOS 26.6.2.
+
 Keys it leaves out (Today View, page IDs) keep their values on the phone. Any installed app that isn't listed anywhere goes to the App Library, never onto a page.
 
 `tools/sbhelper/` contains the simulator harness used to work this out. It feeds layouts to the simulator's SpringBoard through the same import path a USB write takes.

@@ -262,6 +262,42 @@ class Session:
                 w["userSelectedElementIdentifier"] = known[w["displayIdentifier"]]
         return state
 
+    # ---- web clip memory -----------------------------------------------------------------
+    # Web clips kept off the Home Screen aren't installed apps, so the installed-app list can't
+    # put them in the App Library, and USB never reports them. A write that leaves one out makes
+    # iOS put it in the first free cell on a page. So every web clip ever seen is remembered per
+    # phone, and one that isn't on the Home Screen is sent in the App Library.
+
+    @property
+    def _webclips_path(self) -> Path:
+        return self._dev_dir("webclips") / "seen.json"
+
+    def _known_webclips(self) -> dict[str, dict[str, str]]:
+        return json.loads(self._webclips_path.read_text()) if self._webclips_path.exists() else {}
+
+    def _remember_webclips(self, state: list[Any], library: list[Any] | None) -> None:
+        known = self._known_webclips()
+        before = len(known)
+        for n in Layout(state, library=library).nodes.values():
+            if n.kind == "webclip":
+                known[n.id] = {k: n.raw[k] for k in ("displayIdentifier", "displayName", "webClipURL")
+                               if isinstance(n.raw.get(k), str)}
+        if len(known) != before:
+            self._webclips_path.write_text(json.dumps(known, indent=1, sort_keys=True))
+
+    def _with_webclips(self, state: list[Any], library: list[Any] | None) -> list[Any] | None:
+        """library plus every remembered web clip that isn't on the Home Screen."""
+        if library is None:
+            return None
+        here = {n.id for n in Layout(state, library=library).nodes.values()}
+        return library + [dict(w) for i, w in sorted(self._known_webclips().items()) if i not in here]
+
+    async def _read_source(self) -> tuple[list[Any], list[Any] | None]:
+        state, library = await self.source.read()
+        self._remember_widget_ids(state)
+        self._remember_webclips(state, library)
+        return state, self._with_webclips(state, library)
+
     # ---- gap memory ----------------------------------------------------------------------
     # The phone never reports gaps over USB, and a write without them closes every gap. So the
     # gaps set in Homescreen are remembered per phone and sent again on every write.
@@ -297,8 +333,7 @@ class Session:
         info = await self.source.info()
         self.device_id = info.get("UniqueDeviceID") or self.source.name
         self.info = {k: v for k, v in info.items() if k in ("DeviceName", "ProductType", "ProductVersion")}
-        state, library = await self.source.read()
-        self._remember_widget_ids(state)
+        state, library = await self._read_source()
         reads = self._dev_dir("reads")
         (reads / f"{_stamp()}.plist").write_bytes(_pack(state, library))
         for old in sorted(reads.glob("*.plist"))[:-KEEP_READS]:
@@ -346,11 +381,12 @@ class Session:
 
     async def _write_verified(self, target: list[Any], target_lib: list[Any] | None,
                               label: str, pins: list[dict[str, int]] | None = None) -> dict[str, Any]:
-        current, current_lib = await self.source.read()
-        self._remember_widget_ids(current)
+        current, current_lib = await self._read_source()
         backup = self._backup(current, current_lib, label,
                               pins_by_page(self._layout_from(current, current_lib)))
         target = self._restore_widget_ids(target)
+        if target_lib is not None:
+            target_lib = self._with_webclips(target, target_lib)
         # A backup made before the App Library was tracked has no library list; judge the
         # result on dock and pages only (the source keeps unlisted apps in the library).
         lib_known = target_lib is not None
@@ -358,7 +394,7 @@ class Session:
             await self.source.write(target, target_lib, pins)
         except Exception as e:
             # A lost response doesn't tell us whether the write landed. Look, don't retry.
-            after, after_lib = await self.source.read()
+            after, after_lib = await self._read_source()
             want_pins = {k: v for page in pins or [] for k, v in page.items()}
             got_pins = getattr(self.source, "pins", None)
             landed = (placed_structure(after, after_lib if lib_known else None,
@@ -367,7 +403,7 @@ class Session:
             return {"ok": landed, "backup": backup.name,
                     "error": f"write call failed ({e}); re-read shows the new layout "
                              f"{'DID' if landed else 'did NOT'} land. Not retrying."}
-        after, after_lib = await self.source.read()
+        after, after_lib = await self._read_source()
         want_pins = {k: v for page in pins or [] for k, v in page.items()}
         # the phone can't report gaps; there the written gaps are taken as given and the order checked
         got_pins = getattr(self.source, "pins", None)
@@ -388,6 +424,13 @@ class Session:
                           if k in gp and wp[k] != gp[k] and not k.startswith(("folder:", "widget:"))},
                 "pages": f"wanted {len(target) - 1}, got {len(after) - 1}",
             }
+            surfaced = [got.nodes[i].name for i in res["mismatches"]["added_by_ios"]
+                        if got.nodes[i].kind == "webclip"]
+            if surfaced:
+                # remembered now, so the next write keeps them in the App Library
+                res["hidden_webclips"] = surfaced
+                res["hint"] = ("iOS put web clips it had never reported into free spots. They're "
+                               "remembered now: move them to the App Library and apply again.")
         if ok:
             # remember the gaps that were just written (the phone won't report them back)
             written = Layout(after, library=after_lib)
@@ -406,7 +449,7 @@ class Session:
         problems = lay.validate()
         if problems:
             raise LayoutError(f"draft has problems, not applying: {problems}")
-        now, now_lib = await self.source.read()
+        now, now_lib = await self._read_source()
         if structure(now, now_lib) != structure(lay.source, lay.source_library):
             raise LayoutError("the phone's layout changed since it was read (app installed or moved?). "
                               "Read again and redo the edits.")
