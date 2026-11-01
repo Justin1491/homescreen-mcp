@@ -20,6 +20,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from . import organize, usage
+from . import config
 from .config import DATA, session
 from .model import Layout, LayoutError, Node, widget_apps
 
@@ -69,20 +70,23 @@ def _usage_view(lay: Layout) -> dict[str, Any] | None:
     if not u.get("ok"):
         return {"ok": False, "error": u.get("error")}
     opens = u["opens"]
-    return {"ok": True, "days": u["days"], "original": usage.swipes(lay.original(), opens),
+    return {"ok": True, "days": u["days"], "source": u.get("source", "mac"), "reports": u.get("reports"),
+            "background": [lay.nodes[b].name for b in u.get("background", []) if b in lay.nodes],
+            "original": usage.swipes(lay.original(), opens),
             "now": usage.swipes(lay, opens), "top": usage.top_apps(lay, opens, 12)}
 
 
 def view() -> dict[str, Any]:
     s = session()
     if s.layout is None:
-        return {"loaded": False, "source": s.source.name}
+        return {"loaded": False, "source": s.source.name, "device_id": config.current_device()}
     lay = s.layout
     d = lay.diff()
     moved = {k.rsplit("[", 1)[-1].rstrip("]") for k in d["moves"]}
     return {
         "loaded": True,
         "source": s.source.name,
+        "device_id": s.device_id,
         "device": s.info,
         "dock": [_item(n, lay) for n in lay.dock],
         "pages": [_page(p, lay) for p in lay.pages],
@@ -96,6 +100,7 @@ def view() -> dict[str, Any]:
         "history": s.history(),
         "gaps": {"readable": s.gaps_readable, "count": len(lay.pins), "changed": d["gaps_changed"]},
         "slots": {"page": lay.page_slots, "dock": lay.dock_slots},
+        "grid": lay.grid.to_dict(),
     }
 
 
@@ -175,12 +180,22 @@ async def post_op(request: Request) -> Response:
             colors = await s.icon_colors()
             s.edit(lambda lay: organize.by_color(lay, colors, args.get("keep_first_page", True)))
         elif name == "load_usage":
-            await asyncio.to_thread(s.load_usage, int(args.get("days", 30)))
+            if args.get("source") == "device":
+                async with _device_lock:
+                    await s.load_device_usage()
+            else:
+                await asyncio.to_thread(s.load_usage, int(args.get("days", 30)))
         elif name == "optimize_usage":
-            if s.usage is None:
-                await asyncio.to_thread(s.load_usage)
+            if s.usage is None:  # the device's own reports first, then Screen Time on this Mac
+                try:
+                    async with _device_lock:
+                        await s.load_device_usage()
+                except Exception:
+                    s.usage = None
+                if not (s.usage or {}).get("ok"):
+                    await asyncio.to_thread(s.load_usage)
             if not s.usage.get("ok"):
-                raise LayoutError(s.usage.get("error", "no Screen Time data"))
+                raise LayoutError(s.usage.get("error", "no usage data"))
             opens = s.usage["opens"]
             s.edit(lambda lay: usage.optimize(lay, opens, args.get("keep_first_page", False)))
         elif name == "group_categories":
@@ -226,6 +241,54 @@ async def post_apply(request: Request) -> Response:
     return JSONResponse({"result": result, "view": view()})
 
 
+_names: dict[str, dict[str, Any]] = {}  # udid -> name/model/version, looked up once per launch
+
+
+async def _connected() -> dict[str, dict[str, Any]]:
+    from pymobiledevice3 import usbmux
+    from pymobiledevice3.lockdown import create_using_usbmux
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        devs = await usbmux.list_devices()
+    except Exception:
+        return out
+    for d in sorted(devs, key=lambda d: d.connection_type != "USB"):  # USB first
+        if d.serial in out:
+            continue
+        if d.serial not in _names:
+            try:
+                v = (await create_using_usbmux(serial=d.serial)).all_values
+                _names[d.serial] = {"name": v.get("DeviceName"), "model": v.get("ProductType"),
+                                    "version": v.get("ProductVersion"), "class": v.get("DeviceClass")}
+            except Exception:
+                continue  # locked and never trusted, or gone already
+        out[d.serial] = {**_names[d.serial], "connection": "USB" if d.connection_type == "USB" else "Wi-Fi"}
+    return out
+
+
+async def get_devices(request: Request) -> Response:
+    if (bad := _guard(request)):
+        return bad
+    if not config.switching():
+        return JSONResponse({"switching": False, "current": None, "devices": []})
+    connected = await _connected()
+    known = config.known_devices()
+    devices = [{"udid": u, **known.get(u, {}), **c, "connected": True, "draft": u in known} for u, c in connected.items()]
+    devices += [{"udid": u, **k, "connected": False, "draft": True} for u, k in known.items() if u not in connected]
+    return JSONResponse({"switching": True, "current": config.current_device(), "devices": devices})
+
+
+async def post_device(request: Request) -> Response:
+    if (bad := _guard(request)):
+        return bad
+    udid = str((await _json(request)).get("udid", ""))
+    if not udid:
+        return _err(LayoutError("no device given"))
+    async with _device_lock:
+        config.select_device(udid)
+    return JSONResponse(view())
+
+
 async def get_backups(request: Request) -> Response:
     if (bad := _guard(request)):
         return bad
@@ -267,6 +330,8 @@ app = Starlette(routes=[
     Route("/api/op", post_op, methods=["POST"]),
     Route("/api/read", post_read, methods=["POST"]),
     Route("/api/apply", post_apply, methods=["POST"]),
+    Route("/api/devices", get_devices),
+    Route("/api/device", post_device, methods=["POST"]),
     Route("/api/backups", get_backups),
     Route("/api/restore", post_restore, methods=["POST"]),
     Route("/icon", get_icon),
@@ -274,8 +339,29 @@ app = Starlette(routes=[
 ])
 
 
+def _exit_with_parent(pid: int) -> None:
+    """Inside Homescreen.app: stop when the app is gone, even if it crashed."""
+    import os
+    import time
+
+    def watch() -> None:
+        while True:
+            time.sleep(1)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                os._exit(0)
+            except PermissionError:
+                pass
+    threading.Thread(target=watch, daemon=True).start()
+
+
 def main(port: int = 8765, open_browser: bool = True) -> None:
+    import os
     import uvicorn
+    config.enable_device_switching()
+    if os.environ.get("HOMESCREEN_PARENT_PID", "").isdigit():
+        _exit_with_parent(int(os.environ["HOMESCREEN_PARENT_PID"]))
     url = f"http://127.0.0.1:{port}/"
     print(f"Homescreen is running at {url}  (Ctrl-C to stop)")
     if open_browser:

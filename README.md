@@ -1,6 +1,6 @@
 # Homescreen
 
-**Arrange your iPhone Home Screen from your Mac.** Drag and drop with your real icons, sort by color or by how much you use each app, keep App Library apps where they belong, then apply the layout over USB. You can also let an AI assistant do the arranging through MCP.
+**Arrange your iPhone or iPad Home Screen from your Mac.** Drag and drop with your real icons, sort by color or by how much you use each app, keep App Library apps where they belong, then apply the layout over USB. You can also let an AI assistant do the arranging through MCP.
 
 Free and open source. Runs entirely on your Mac. No account, no server, no jailbreak.
 
@@ -11,7 +11,8 @@ Free and open source. Runs entirely on your Mac. No account, no server, no jailb
 
 ## Features
 
-- **Drag-and-drop editor** on the real 4×6 grid: your phone's real icons, widgets at their real sizes, folders (several pages each), the dock, and page add/move/delete.
+- **Mac app**: one download, nothing to install. It finds connected iPhones and iPads, and keeps a separate draft and backups for each.
+- **Drag-and-drop editor** on the device's real grid (4×6 on iPhone; iPads report their own, e.g. 5×6): real icons, widgets at their real sizes, folders (several pages each), the dock, and page add/move/delete.
 - **Gaps (empty spaces).** Drop an app on any empty spot to place it exactly there. Homescreen writes the gap to the phone and remembers it, so it survives later edits.
 - **Widgets keep their settings** (which script, which person, which city) through every apply.
 - **App Library that stays put.** Apps you keep only in the App Library stay there when you apply, and you can drag apps into or out of it. Most tools get this wrong ([why](#why-other-tools-dump-app-library-apps-onto-your-home-screen)).
@@ -20,7 +21,7 @@ Free and open source. Runs entirely on your Mac. No account, no server, no jailb
   - by color
   - A–Z
   - by App Store category
-  - **by Screen Time usage**: moves your most-used apps onto the first pages, with an estimate of how many page swipes that saves
+  - **by how much you use each app**: moves your most-used apps onto the first pages, with an estimate of how many page swipes that saves. Usage comes from the device itself (no setup) or from Screen Time synced to your Mac
 - **Undo/redo** for every change, multi-select, search, and swap (⌥-drop).
 - **Safe apply:**
   1. Nothing reaches the phone until you review and apply.
@@ -28,39 +29,47 @@ Free and open source. Runs entirely on your Mac. No account, no server, no jailb
   3. The result is read back and verified.
   4. A failed write is never blindly retried.
   5. Any backup can be restored in one click.
-- **AI assistant (MCP):** 28 tools so Claude (or any MCP client) can read, rearrange, sort and explain your layout. Writing to the phone stays off unless you enable it.
+- **AI assistant (MCP):** 30 tools so Claude (or any MCP client) can read, rearrange, sort and explain your layout. Writing to the phone stays off unless you enable it.
 - **CLI** for scripting: `homescreen read | show | diff | apply | backups | restore | probe | ui`.
 
 ## Requirements
 
-- A Mac with Python 3.11+ (developed on Apple silicon; Intel should work but is untested).
-- An iPhone connected by USB and trusted ("Trust This Computer").
-- Tested with iOS 27.0.1 (iPhone 17 Pro Max) and the iOS 27.2 simulator. Other versions may work; the safety checks will tell you if a write didn't land as planned.
+- A Mac with Apple silicon and macOS 14 or later (the app). The Python package also runs on Intel Macs with Python 3.11+.
+- An iPhone or iPad connected by USB and trusted ("Trust This Computer").
+- Tested with iOS 27.0.1 (iPhone 17 Pro Max), iOS 26.6.2 (iPhone 17 Pro), iPadOS 26.6.2 (iPad Air 13") and the iOS 27.2 simulator. Other versions may work; the safety checks will tell you if a write didn't land as planned.
 
 ## Install
 
+**The app:** download `Homescreen-<version>.dmg` from [Releases](https://github.com/kats1123/homescreen-mcp/releases), open it and drag Homescreen to Applications.
+
+The app isn't notarized by Apple (that needs a paid developer account), so the first time macOS will refuse to open it. Right-click Homescreen in Applications, choose **Open**, then **Open** again. Or, after the first try, go to System Settings › Privacy & Security and click **Open Anyway**. You only do this once.
+
+**Or the Python package** (CLI, MCP server and the same editor in your browser):
 ```bash
 pipx install git+https://github.com/kats1123/homescreen-mcp
+homescreen ui
 ```
-(or `python3 -m pip install --user git+https://github.com/kats1123/homescreen-mcp`)
 
 ## Use it
 
-```bash
-homescreen ui
-```
-Your browser opens the app at `http://127.0.0.1:8765`. Then:
-1. Plug in your iPhone, unlock it and click **Read iPhone**.
-2. Rearrange.
-3. Click **Review & Apply**.
+1. Open Homescreen and plug in your iPhone or iPad. Unlock it and tap **Trust** if asked.
+2. Pick the device at the top if several are connected, then click **Read**.
+3. Rearrange.
+4. Click **Review & Apply**.
 
 Before a big rearrangement, **unhide any hidden Home Screen pages** on the phone (long-press the Home Screen, tap the page dots). iOS doesn't report which pages are hidden, so apps could otherwise end up on a page you can't see.
 
-**Screen Time:** turn on *Settings › Screen Time › Share Across Devices* on the iPhone and the Mac. The app reads the synced history locally, which needs **Full Disk Access** for the Terminal you run `homescreen` from (System Settings › Privacy & Security).
+**App usage** has two sources:
+- **From the device** (no setup): iOS writes a memory report now and then that lists the apps it's holding in memory. Over days and weeks that shows which apps you actually use. Apps that iOS keeps running for calls, or keeps in memory every day, are counted less, since being in memory doesn't mean you opened them. Nothing on the device is changed.
+- **From Screen Time:** turn on *Settings › Screen Time › Share Across Devices* on the device and the Mac. Homescreen reads the synced history locally, which needs **Full Disk Access** for Homescreen (or the Terminal you run `homescreen` from) in System Settings › Privacy & Security.
 
 ## Let an AI assistant arrange it
 
-Add the MCP server to Claude Code:
+Add the MCP server to Claude Code. With the app, use **Device › Copy MCP Setup Command** and paste it in Terminal. It points at the engine inside the app:
+```bash
+claude mcp add homescreen -- /Applications/Homescreen.app/Contents/Resources/engine/engine mcp
+```
+With the Python package:
 ```bash
 claude mcp add homescreen -- homescreen-mcp
 ```
@@ -121,10 +130,16 @@ Data (drafts, backups, icon cache) lives in `~/Library/Application Support/homes
 ## Limitations
 
 - Hidden pages and gaps made on the phone itself can't be read (see above).
-- **iPad is early.** The grid, dock size and folder size come from the device (an iPad Air 13" reports 5×6, a 26-app dock and 16 per folder page), and arranging through MCP or the CLI works (tested on iPadOS 26.6.2). The editor still draws an iPhone grid. iPad widget sizes don't map onto the icon grid like iPhone ones, so a widget page is only accepted when it keeps the shape iPadOS gave it.
+- **iPad support is new.** The grid, dock size and folder size come from the device (an iPad Air 13" reports 5×6, a 26-app dock and 16 per folder page), and arranging through MCP or the CLI works (tested on iPadOS 26.6.2). The editor draws the iPad's grid. iPad widget sizes don't map onto the icon grid like iPhone ones, so a widget page is only accepted when it keeps the shape iPadOS gave it.
 - A few system apps that iOS never shows on the Home Screen are listed in `NEVER_ON_HOME_SCREEN` (`homescreen/device.py`). If a write reports one under `added_by_ios`, add it there.
 
 ## Development
+
+Build the Mac app (Apple silicon, Xcode command-line tools) into `build/`:
+```bash
+macapp/build.sh
+```
+It bundles the engine with PyInstaller, compiles the Swift shell in `macapp/Shell`, ad-hoc signs the app and makes a DMG.
 
 ```bash
 git clone https://github.com/kats1123/homescreen-mcp && cd homescreen-mcp

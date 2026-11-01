@@ -234,6 +234,15 @@ class PhoneSource:
         async with InstallationProxyService(lockdown=await self._ld()) as ip:
             return await ip.get_apps(application_type="Any", calculate_sizes=False, show_placeholders=True)
 
+    async def memory_reports(self, out: Path) -> list[Path]:
+        """Copy the device's JetsamEvent reports (written when memory runs low; each lists the
+        apps held in memory) into out. Read-only: nothing is erased on the device."""
+        from pymobiledevice3.services.crash_reports import CrashReportsManager
+        out.mkdir(parents=True, exist_ok=True)
+        async with CrashReportsManager(await self._ld()) as cr:
+            await cr.pull(str(out), match=r"JetsamEvent", progress_bar=False)
+        return sorted(out.rglob("JetsamEvent*.ips"))
+
     async def read(self) -> Layout:
         raw = await self.read_raw(self.format_version)
         if is_dict_format(raw):

@@ -74,6 +74,10 @@ function fallback(wrap, name) {
   wrap.textContent = (name || "?").trim().charAt(0).toUpperCase();
 }
 
+// the device being edited: "iPad" or "iPhone", and its grid (iPads report their own)
+const D = () => ((V && V.device && V.device.ProductType) || "").startsWith("iPad") ? "iPad" : "iPhone";
+const G = () => (V && V.grid) || { cols: 4, rows: 6, dock: 4, folder: 9 };
+
 const matches = (item) => !query || item.name.toLowerCase().includes(query) || item.id.toLowerCase().includes(query);
 
 function findItem(id) {
@@ -160,12 +164,14 @@ function render() {
   $("#library-panel").hidden = !loaded;
   for (const id of ["undo", "redo", "reset", "organize-btn", "search"]) $("#" + id).disabled = !loaded;
   if (!loaded) {
-    $("#device").textContent = V && V.source && V.source !== "phone" ? V.source : "No device read yet";
+    $("#device").textContent = V && V.source && V.source !== "phone" ? V.source : (deviceLabel() || "No device");
+    $("#read").textContent = "Read device";
     renderFooter();
     return;
   }
   const d = V.device || {};
-  $("#device").textContent = [d.DeviceName, d.ProductVersion && "iOS " + d.ProductVersion].filter(Boolean).join(" · ") || V.source;
+  $("#device").textContent = [d.DeviceName, d.ProductVersion && (D() === "iPad" ? "iPadOS " : "iOS ") + d.ProductVersion].filter(Boolean).join(" · ") || V.source;
+  $("#read").textContent = "Read " + D();
   $("#undo").disabled = !V.history.undo;
   $("#redo").disabled = !V.history.redo;
   renderDock();
@@ -212,6 +218,7 @@ function renderItem(item, container) {
 
 function renderDock() {
   const dock = $("#dock");
+  dock.style.setProperty("--dock-cols", Math.max(4, V.dock.length + (V.dock.length < G().dock ? 1 : 0)));
   dock.replaceChildren(...V.dock.map((it) => renderItem(it, { target: "dock" })));
 }
 
@@ -224,7 +231,10 @@ function renderPages() {
     const head = el("div", "page-head");
     head.appendChild(el("span", "num", `Page ${n}`));
     const used = page.reduce((a, it) => a + (it.slots || 1), 0);
-    const slots = el("span", "slots" + (used > V.slots.page ? " over" : ""), `${used}/${V.slots.page}`);
+    const over = V.diff.problems.some((p) => p.startsWith(`page ${n} needs`));
+    const trusted = used > V.slots.page && !over;  // an iPad widget page as iPadOS laid it out
+    const slots = el("span", "slots" + (over ? " over" : ""), trusted ? "as on device" : `${used}/${V.slots.page}`);
+    if (trusted) slots.title = "iPad widgets don't map exactly onto the icon grid; this page keeps the shape iPadOS gave it";
     head.appendChild(slots);
     const tools = el("div", "tools");
     const tb = (label, title, fn, disabled) => {
@@ -245,6 +255,9 @@ function renderPages() {
     head.appendChild(tools);
     card.appendChild(head);
     const grid = el("div", "grid");
+    const { cols, rows } = G();
+    grid.style.setProperty("--cols", cols);
+    grid.style.setProperty("--rows", rows);
     const ctx = { target: `page:${n}` };
     const taken = new Set();
     for (const it of page) {
@@ -253,16 +266,16 @@ function renderPages() {
         const [r, c, w, h] = it.pos;
         node.style.gridRow = `${r + 1} / span ${h}`;
         node.style.gridColumn = `${c + 1} / span ${w}`;
-        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) taken.add((r + y) * 4 + c + x);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) taken.add((r + y) * cols + c + x);
       }
       if (it.pinned) node.classList.add("pinned");
       grid.appendChild(node);
     }
-    for (let cell = 0; cell < 24; cell++) {
+    for (let cell = 0; cell < cols * rows && !trusted; cell++) {
       if (taken.has(cell)) continue;
       const slot = el("div", "slot");
-      slot.style.gridRow = `${Math.floor(cell / 4) + 1}`;
-      slot.style.gridColumn = `${(cell % 4) + 1}`;
+      slot.style.gridRow = `${Math.floor(cell / cols) + 1}`;
+      slot.style.gridColumn = `${(cell % cols) + 1}`;
       slot.title = "Drop here to place an app exactly in this spot";
       wireSlot(slot, n, cell);
       grid.appendChild(slot);
@@ -311,39 +324,51 @@ function renderBank() {
 
 function renderUsage() {
   const box = $("#usage");
-  box.replaceChildren(el("h2", null, "Screen Time"));
+  box.replaceChildren(el("h2", null, "App usage"));
   const u = V.usage;
   if (!u || !u.ok) {
     box.appendChild(el("p", "note", u && u.error ? u.error
-      : "See how many page swipes your layout costs, based on the last 30 days of Screen Time synced to this Mac."));
-    const b = el("button", null, "Load Screen Time");
-    b.onclick = () => withBusy("Reading Screen Time…", () => op("load_usage"));
-    box.appendChild(b);
+      : `See which apps get used and how many page swipes your layout costs. Read it from the ${D()}'s own memory reports, or from Screen Time synced to this Mac.`));
+    const row = el("div", "usage-actions");
+    const a = el("button", "primary", `From the ${D()}`);
+    a.onclick = () => withBusy(`Reading usage from the ${D()}…`, () => op("load_usage", { source: "device" }));
+    const b = el("button", null, "From Screen Time");
+    b.title = "Needs Screen Time › Share Across Devices, and Full Disk Access for this app";
+    b.onclick = () => withBusy("Reading Screen Time…", () => op("load_usage", { source: "mac" }));
+    row.append(a, b);
+    box.appendChild(row);
     return;
   }
   const max = Math.max(u.original, u.now, 1);
   const bars = el("div", "bars");
-  for (const [label, val, cls] of [["On iPhone", u.original, ""], ["This draft", u.now, "now"]]) {
-    const b = el("div", "bar " + cls);
+  for (const [label, val, cls] of [["On " + D(), u.original, ""], ["This draft", u.now, "now"]]) {
+    const b = el("div", "ubar " + cls);
     const i = el("i");
     i.style.height = `${Math.max(4, Math.round((val / max) * 62))}px`;
     b.append(el("b", null, val.toLocaleString()), i, el("span", null, label));
     bars.appendChild(b);
   }
-  box.appendChild(el("p", "note", `Estimated page swipes, last ${u.days} days`));
+  box.appendChild(el("p", "note", u.source === "device"
+    ? `From ${u.reports} memory reports on the ${D()} over ${u.days} days. Estimated page swipes:`
+    : `Estimated page swipes, last ${u.days} days of Screen Time`));
   box.appendChild(bars);
   if (u.original) {
     const pct = Math.round((1 - u.now / u.original) * 100);
     box.appendChild(el("div", "gain" + (pct < 0 ? " worse" : ""),
-      pct > 0 ? `${pct}% fewer swipes` : pct < 0 ? `${-pct}% more swipes` : "Same as on the iPhone"));
+      pct > 0 ? `${pct}% fewer swipes` : pct < 0 ? `${-pct}% more swipes` : "Same as on the " + D()));
   }
   const ul = el("ul", "top");
   for (const a of u.top) {
     const li = el("li");
-    li.append(iconImg({ icon: a.id, name: a.name }), el("span", "n", a.name), el("span", "w", `${a.opens.toLocaleString()} · ${a.where}`));
+    li.append(iconImg({ icon: a.id, name: a.name }), el("span", "n", a.name),
+      el("span", "w", u.source === "device" ? a.where : `${a.opens.toLocaleString()} · ${a.where}`));
     ul.appendChild(li);
   }
   box.appendChild(ul);
+  if (u.background && u.background.length) {
+    const n = el("p", "note bg", `Counted less, since iOS also runs them in the background: ${u.background.slice(0, 8).join(", ")}${u.background.length > 8 ? "…" : ""}`);
+    box.appendChild(n);
+  }
 }
 
 function renderDrawer() {
@@ -356,8 +381,9 @@ function renderDrawer() {
   box.replaceChildren();
   folder.pages.forEach((page, i) => {
     const fp = el("div", "fpage");
-    fp.appendChild(el("div", "num", `Folder page ${i + 1} · ${page.length}/9`));
+    fp.appendChild(el("div", "num", `Folder page ${i + 1} · ${page.length}/${G().folder}`));
     const g = el("div", "fgrid");
+    g.style.setProperty("--fcols", Math.round(Math.sqrt(G().folder)));
     const ctx = { target: `${folder.id}:${i + 1}` };
     for (const it of page) g.appendChild(renderItem(it, ctx));
     fp.appendChild(g);
@@ -377,7 +403,7 @@ function renderSelection() {
 function renderFooter() {
   const s = $("#summary");
   const btn = $("#review");
-  if (!V || !V.loaded) { s.textContent = "Read your iPhone to start"; btn.disabled = true; return; }
+  if (!V || !V.loaded) { s.textContent = "Read your device to start"; btn.disabled = true; return; }
   const d = V.diff;
   s.replaceChildren();
   const add = (t, b) => { if (b) { s.appendChild(el("b", null, t)); } else s.appendChild(document.createTextNode(t)); };
@@ -509,7 +535,7 @@ async function dropOnto(item, ids, ctx) {
   if (item.kind === "folder") {
     const pages = item.pages || [[]];
     const last = pages.length;
-    const room = 9 - (pages[last - 1] || []).length;
+    const room = G().folder - (pages[last - 1] || []).length;
     const target = `${item.id}:${room >= ids.length ? last : last + 1}`;
     if (await op("move_many", { ids, target })) { sel.clear(); toast(`Moved into ${item.name}`); }
     return;
@@ -546,14 +572,71 @@ async function selectionToLibrary() {
   if (ids.length) await moveIds(ids, "library", null);
 }
 
+// ---- devices ------------------------------------------------------------------------------
+
+let DEV = { switching: false, current: null, devices: [] };
+
+const deviceLabel = () => {
+  const d = DEV.devices.find((x) => x.udid === DEV.current);
+  return d ? d.name || d.udid : "";
+};
+
+async function loadDevices() {
+  try { DEV = await api("/api/devices"); } catch (_) { return; }
+  $("#device-btn").classList.toggle("static", !DEV.switching);
+  // nothing chosen yet: take the first connected device
+  if (DEV.switching && !DEV.devices.some((d) => d.udid === DEV.current)) {
+    const first = DEV.devices.find((d) => d.connected);
+    if (first) return selectDevice(first.udid, true);
+  }
+  renderDeviceMenu();
+  if (!V || !V.loaded) render();
+}
+
+function renderDeviceMenu() {
+  const m = $("#device-menu");
+  m.replaceChildren();
+  if (!DEV.devices.length) {
+    m.appendChild(el("div", "menu-note", "No devices. Connect an iPhone or iPad with a cable and unlock it."));
+  }
+  for (const d of DEV.devices) {
+    const b = el("button", "device-row" + (d.udid === DEV.current ? " current" : ""));
+    const dot = el("i", d.connected ? "on" : "off");
+    const text = el("span", "t");
+    text.append(el("b", null, d.name || d.udid),
+      el("small", null, [d.version && ((d.model || "").startsWith("iPad") ? "iPadOS " : "iOS ") + d.version,
+        d.connected ? d.connection : "not connected", d.draft && "draft saved"].filter(Boolean).join(" · ")));
+    b.append(dot, text);
+    b.onclick = () => { m.hidden = true; if (d.udid !== DEV.current) selectDevice(d.udid); };
+    m.appendChild(b);
+  }
+  const r = el("button", "menu-foot", "Refresh list");
+  r.onclick = (e) => { e.stopPropagation(); loadDevices(); };
+  m.appendChild(r);
+}
+
+async function selectDevice(udid, quiet) {
+  if (!quiet && V && V.loaded && V.diff.items_moved) {
+    toast("Your changes are kept as this device's draft", "ok");
+  }
+  try {
+    setView(await api("/api/device", { udid }));
+    DEV.current = udid;
+    sel.clear();
+    openFolder = null;
+    renderDeviceMenu();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
 // ---- top-level actions ----------------------------------------------------------------
 
 async function readDevice() {
   if (V && V.loaded && (V.diff.items_moved || V.history.undo)) {
-    if (!(await confirmBox("Read again?", "This replaces your unapplied changes with what's on the iPhone now.", "Read", true))) return;
+    if (!(await confirmBox("Read again?", `This replaces your unapplied changes with what's on the ${D()} now.`, "Read", true))) return;
   }
   try {
-    const v = await withBusy("Reading your iPhone…", () => api("/api/read", {}));
+    const v = await withBusy(`Reading your ${V && V.loaded ? D() : "device"}…`, () => api("/api/read", {}));
     setView(v);
     sel.clear();
     toast("Read your Home Screen", "ok");
@@ -584,18 +667,18 @@ async function review() {
   }
   body.appendChild(ul);
   if (V.gaps && !V.gaps.readable) {
-    body.appendChild(el("p", null, "Gaps: iOS doesn't report empty spaces or hidden pages over USB, so any gaps made on the iPhone itself will close. "
+    body.appendChild(el("p", null, `Gaps: iOS doesn't report empty spaces or hidden pages over USB, so any gaps made on the ${D()} itself will close. `
       + (V.gaps.count ? `The ${V.gaps.count} placed item${V.gaps.count > 1 ? "s" : ""} you set here keep their spots.` : "To keep a gap, place the app in that spot here.")));
   }
-  body.appendChild(el("p", null, "Your current layout is backed up first. After writing, the app reads the iPhone again to check the result."));
+  body.appendChild(el("p", null, `Your current layout is backed up first. After writing, the app reads the ${D()} again to check the result.`));
   const actions = [{ label: d.problems.length ? "Close" : "Cancel", value: () => false }];
   if (!d.problems.length) actions.push({ label: "Apply", primary: true, value: () => true });
-  if (!(await modal({ title: d.problems.length ? "Fix these first" : "Apply to iPhone", body, actions }))) return;
+  if (!(await modal({ title: d.problems.length ? "Fix these first" : `Apply to ${D()}`, body, actions }))) return;
   try {
-    const res = await withBusy("Writing to your iPhone…", () => api("/api/apply", { token: d.apply_token }));
+    const res = await withBusy(`Writing to your ${D()}…`, () => api("/api/apply", { token: d.apply_token }));
     setView(res.view);
     const r = res.result;
-    if (r.ok) toast("Applied and verified on the iPhone", "ok");
+    if (r.ok) toast(`Applied and verified on the ${D()}`, "ok");
     else showResult(r);
   } catch (e) {
     toast(e.message, "error");
@@ -603,14 +686,39 @@ async function review() {
 }
 
 function showResult(r) {
+  const clips = (r.mismatches && r.mismatches.added_by_ios || []).filter((id) => (findItem(id) || {}).kind === "webclip");
+  if (r.hidden_webclips && clips.length) return showHiddenClips(r, clips);
   const body = el("div");
-  body.appendChild(el("p", null, r.error || "The iPhone doesn't match the plan exactly. Details:"));
+  body.appendChild(el("p", null, r.error || `The ${D()} doesn't match the plan exactly. Details:`));
   const pre = el("pre");
   pre.style.cssText = "white-space:pre-wrap;font-size:12px;max-height:40vh;overflow:auto";
   pre.textContent = JSON.stringify(r.mismatches || {}, null, 1);
   body.appendChild(pre);
   body.appendChild(el("p", null, `Backup saved as ${r.backup}. You can restore it from Backups.`));
   modal({ title: "Check the result", body, actions: [{ label: "OK", primary: true, value: () => null }] });
+}
+
+// iOS keeps web clips that are off the Home Screen but never reports them over USB; when a
+// write frees a spot, it puts one there. Homescreen remembers them from now on.
+async function showHiddenClips(r, ids) {
+  const body = el("div");
+  body.appendChild(el("p", null, `Everything else landed as planned. The ${D()} also had ${ids.length === 1 ? "a web clip" : `${ids.length} web clips`} `
+    + "that iOS never reports, and it put them in free spots:"));
+  const ul = el("ul", "moves");
+  for (const n of r.hidden_webclips) ul.appendChild(el("li", null, n));
+  body.appendChild(ul);
+  body.appendChild(el("p", null, "Homescreen knows about them now. Send them back to the App Library, or leave them on the Home Screen and arrange them like any app."));
+  const act = await modal({ title: "Hidden web clips showed up", body, actions: [
+    { label: "Keep them here", value: () => "keep" },
+    { label: "Send to App Library", primary: true, value: () => "library" },
+  ] });
+  if (act !== "library") return;
+  if (!(await op("move_many", { ids, target: "library" }))) return;
+  try {
+    const res = await withBusy(`Writing to your ${D()}…`, () => api("/api/apply", { token: V.diff.apply_token }));
+    setView(res.view);
+    res.result.ok ? toast("Web clips are in the App Library", "ok") : showResult(res.result);
+  } catch (e) { toast(e.message, "error"); }
 }
 
 async function showBackups() {
@@ -624,7 +732,7 @@ async function showBackups() {
     const btn = el("button", null, "Restore");
     btn.onclick = async () => {
       $("#modal").hidden = true;
-      if (!(await confirmBox("Restore this backup?", "This writes that layout to your iPhone. Your current layout is backed up first.", "Restore"))) return;
+      if (!(await confirmBox("Restore this backup?", `This writes that layout to your ${D()}. Your current layout is backed up first.`, "Restore"))) return;
       try {
         const res = await withBusy("Restoring…", () => api("/api/restore", { name: b }));
         setView(res.view);
@@ -647,7 +755,7 @@ async function organize(name) {
     if (!ok) return;
     return withBusy("Looking up categories…", () => op(name, { keep_first_page: keep }));
   }
-  const label = { sort_color: "Sorting by color…", optimize_usage: "Optimizing with Screen Time…" }[name];
+  const label = { sort_color: "Sorting by color…", optimize_usage: "Optimizing by usage…" }[name];
   const args = ["sort_color", "sort_alpha"].includes(name) ? { keep_first_page: keep }
     : name === "optimize_usage" ? { keep_first_page: false } : {};
   return label ? withBusy(label, () => op(name, args)) : op(name, args);
@@ -660,6 +768,13 @@ wireZone($("#dock"), { target: "dock" });
 wireZone($("#library"), { target: "library" });
 wireZone($("#bank"), { target: "bank" });
 $("#read").onclick = readDevice;
+$("#device-btn").onclick = (e) => {
+  if (!DEV.switching) return;
+  e.stopPropagation();
+  const m = $("#device-menu");
+  m.hidden = !m.hidden;
+  if (!m.hidden) loadDevices();
+};
 $("#help").onclick = () => {
   const tips = [
     ["Drag an icon", "drop on the left or right edge of another icon to place it there"],
@@ -672,21 +787,21 @@ $("#help").onclick = () => {
     ["App Bank", "park items while you rearrange; empty it before applying"],
     ["⌘Z / ⇧⌘Z", "undo / redo, as far back as you like"],
     ["⌘F", "search; matches are outlined, the rest dim"],
-    ["Screen Time", "estimated page swipes from the last 30 days, and Organize › Optimize"],
-    ["Review & Apply", "backs up the iPhone's layout, writes yours, then reads it back to check"],
+    ["App usage", "from the device's memory reports or Screen Time, and Organize › Optimize"],
+    ["Review & Apply", "backs up the device's layout, writes yours, then reads it back to check"],
   ];
   const body = el("div");
   const ul = el("ul", "moves");
   for (const [k, v] of tips) { const li = el("li"); li.append(el("b", null, k), el("span", "to", v)); ul.appendChild(li); }
   body.appendChild(ul);
-  body.appendChild(el("p", null, "Nothing changes on the iPhone until you apply. Apps in the App Library stay there."));
+  body.appendChild(el("p", null, "Nothing changes on the device until you apply. Apps in the App Library stay there."));
   modal({ title: "How Homescreen works", body, actions: [{ label: "Got it", primary: true, value: () => null }] });
 };
 $("#read-empty").onclick = readDevice;
 $("#undo").onclick = () => op("undo");
 $("#redo").onclick = () => op("redo");
 $("#reset").onclick = async () => {
-  if (await confirmBox("Reset all changes?", "Go back to the layout as read from the iPhone. You can undo this.", "Reset", true)) op("reset");
+  if (await confirmBox("Reset all changes?", `Go back to the layout as read from the ${D()}. You can undo this.`, "Reset", true)) op("reset");
 };
 $("#review").onclick = review;
 $("#backups-btn").onclick = () => showBackups().catch((e) => toast(e.message, "error"));
@@ -694,6 +809,7 @@ $("#organize-btn").onclick = (e) => { e.stopPropagation(); $("#organize-menu").h
 document.querySelectorAll("#organize-menu [data-op]").forEach((b) => { b.onclick = () => organize(b.dataset.op); });
 document.addEventListener("click", (e) => {
   if (!$("#organize-menu").contains(e.target)) $("#organize-menu").hidden = true;
+  if (!$("#device-menu").contains(e.target)) $("#device-menu").hidden = true;
 });
 $("#keep-first").checked = localStorage.getItem("hs.keepFirst") !== "0";
 $("#keep-first").onchange = (e) => { try { localStorage.setItem("hs.keepFirst", e.target.checked ? "1" : "0"); } catch (_) {} };
@@ -737,4 +853,4 @@ window.addEventListener("beforeunload", (e) => {
   if (V && V.loaded && V.diff.items_moved) { e.preventDefault(); e.returnValue = ""; }
 });
 
-api("/api/state").then(setView).catch((e) => { toast(e.message, "error"); setView({ loaded: false }); });
+api("/api/state").then(setView).catch((e) => { toast(e.message, "error"); setView({ loaded: false }); }).then(loadDevices);

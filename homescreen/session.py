@@ -132,12 +132,15 @@ def _safe(s: str) -> str:
 
 
 class Session:
-    def __init__(self, source: Source, data_dir: str | Path):
+    def __init__(self, source: Source, data_dir: str | Path, device: str | None = None):
+        """device: keep this session's draft per device (the app switches between devices);
+        None keeps the single shared draft the CLI and MCP server use."""
         self.source = source
         self.dir = Path(data_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._draft_key = device
         self.layout: Layout | None = None
-        self.device_id: str | None = None
+        self.device_id: str | None = device
         self.info: dict[str, Any] = {}
         self.grid = Grid()
         self.usage: dict[str, Any] | None = None  # Screen Time opens, loaded on request
@@ -149,6 +152,9 @@ class Session:
 
     @property
     def draft_path(self) -> Path:
+        if self._draft_key:
+            (self.dir / "drafts").mkdir(exist_ok=True)
+            return self.dir / "drafts" / f"{_safe(self._draft_key)}.plist"
         return self.dir / "draft.plist"
 
     def _dev_dir(self, kind: str) -> Path:
@@ -231,6 +237,19 @@ class Session:
         lay = self.require()
         known = {n.bundle_id for n in lay.nodes.values() if n.bundle_id}
         self.usage = usage.load(known, days)
+        return self.usage
+
+    async def load_device_usage(self) -> dict[str, Any]:
+        """Usage from the device's own memory reports (no Screen Time sync needed)."""
+        from . import usage
+        lay = self.require()
+        if not hasattr(self.source, "memory_reports"):
+            self.usage = {"ok": False, "error": "This source can't report usage."}
+            return self.usage
+        files = await self.source.memory_reports(self._dev_dir("usage"))
+        apps = await self.source.installed_apps()
+        known = {n.bundle_id for n in lay.nodes.values() if n.bundle_id}
+        self.usage = usage.from_memory_reports(files, apps, known)
         return self.usage
 
     def history(self) -> dict[str, int]:

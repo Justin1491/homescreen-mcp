@@ -178,26 +178,35 @@ def swap(a: str, b: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def screen_time(days: int = 30) -> dict[str, Any]:
-    """App opens over the last `days` from Screen Time synced to this Mac (Share Across Devices),
-    the top apps with where they are now, and estimated page swipes for the phone vs the draft."""
+async def screen_time(days: int = 30, source: str = "device") -> dict[str, Any]:
+    """Which apps get used, the top apps with where they are now, and estimated page swipes for
+    the device vs the draft. source='device': the device's own memory reports (no setup; apps iOS
+    keeps running for calls or in memory every day count less, listed under 'background');
+    source='mac': Screen Time synced to this Mac (Share Across Devices), last `days` days."""
     s = session()
-    u = s.load_usage(days)
+    u = await s.load_device_usage() if source == "device" else s.load_usage(days)
     if not u.get("ok"):
         return u
     lay = s.require()
-    return {"days": days, "top": usage.top_apps(lay, u["opens"], 40),
+    return {"source": source, "days": u["days"], "background": u.get("background", []),
+            "top": usage.top_apps(lay, u["opens"], 40),
             "swipes_on_phone": usage.swipes(lay.original(), u["opens"]),
             "swipes_in_draft": usage.swipes(lay, u["opens"])}
 
 
 @mcp.tool()
-def optimize_by_usage(keep_first_page: bool = False) -> dict[str, Any]:
-    """Most-opened apps and folders onto the earliest pages, most-opened apps onto each folder's
-    first page (Screen Time). Widgets keep their pages; dock and App Library untouched."""
+async def optimize_by_usage(keep_first_page: bool = False) -> dict[str, Any]:
+    """Most-used apps and folders onto the earliest pages, most-used apps onto each folder's
+    first page (usage from screen_time, else the device's memory reports, else Screen Time).
+    Widgets keep their pages; dock and App Library untouched."""
     s = session()
     if s.usage is None:
-        s.load_usage()
+        try:
+            await s.load_device_usage()
+        except Exception:
+            s.usage = None
+        if not (s.usage or {}).get("ok"):
+            s.load_usage()
     if not s.usage.get("ok"):
         return {"ok": False, "error": s.usage.get("error")}
     opens = s.usage["opens"]

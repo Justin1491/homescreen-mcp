@@ -34,9 +34,79 @@ def make_source() -> Source:
 
 _session: Session | None = None
 
+# The app (and `homescreen ui`) can switch between connected devices, each with its own draft.
+# The CLI and MCP server keep one session for the device the environment picks.
+_switching = False
+_sessions: dict[str, Session] = {}
+_current: str | None = None
+LAST_DEVICE = DATA / "last-device.txt"
+
+
+def enable_device_switching() -> None:
+    global _switching, _current
+    if os.environ.get("HOMESCREEN_FIXTURE") or os.environ.get("HOMESCREEN_SIM") or os.environ.get("HOMESCREEN_UDID"):
+        return  # a pinned source: nothing to switch between
+    _switching = True
+    _adopt_shared_draft()
+    if LAST_DEVICE.exists():
+        _current = LAST_DEVICE.read_text().strip() or None
+
+
+def _adopt_shared_draft() -> None:
+    """Carry the single shared draft (CLI / older versions) over as its device's own draft."""
+    import plistlib
+    import shutil
+    shared = DATA / "draft.plist"
+    try:
+        dev = plistlib.loads(shared.read_bytes()).get("device") if shared.exists() else None
+    except Exception:
+        return
+    if dev and dev != "unselected":
+        target = DATA / "drafts" / f"{''.join(c if c.isalnum() or c in '-._' else '_' for c in dev)}.plist"
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(shared, target)
+
+
+def switching() -> bool:
+    return _switching
+
+
+def current_device() -> str | None:
+    return _current if _switching else None
+
+
+def select_device(udid: str) -> Session:
+    global _current
+    _current = udid
+    DATA.mkdir(parents=True, exist_ok=True)
+    LAST_DEVICE.write_text(udid)
+    return session()
+
+
+def known_devices() -> dict[str, dict]:
+    """Devices with a saved draft: {udid: {"name", "version", "model"}}."""
+    import plistlib
+    out = {}
+    for f in sorted((DATA / "drafts").glob("*.plist")) if (DATA / "drafts").exists() else []:
+        try:
+            blob = plistlib.loads(f.read_bytes())
+        except Exception:
+            continue
+        info = blob.get("info", {})
+        if blob.get("device"):
+            out[blob["device"]] = {"name": info.get("DeviceName"), "version": info.get("ProductVersion"),
+                                   "model": info.get("ProductType")}
+    return out
+
 
 def session() -> Session:
     global _session
+    if _switching:
+        key = _current or ""
+        if key not in _sessions:
+            _sessions[key] = Session(PhoneSource(_current), DATA, device=_current or "unselected")
+        return _sessions[key]
     if _session is None:
         _session = Session(make_source(), DATA)
     return _session

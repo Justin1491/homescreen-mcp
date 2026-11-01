@@ -350,3 +350,31 @@ def test_ipad_grid_from_icon_metrics():
     lay.create_folder("F", [f"com.p.a{i}" for i in range(7, 21)], "page:1")
     lay.refold(lay.pages[0][-1])
     assert [len(p) for p in lay.pages[0][-1].children] == [14]  # 16 per folder page
+
+
+def test_usage_from_memory_reports(tmp_path):
+    """Days in memory rank apps; apps iOS runs in the background, or keeps resident, count less."""
+    import json
+    from homescreen.usage import from_memory_reports
+    apps = {"com.g.game": {"CFBundleExecutable": "Game"},
+            "com.g.chat": {"CFBundleExecutable": "Chat", "UIBackgroundModes": ["voip"]},
+            "com.g.resident": {"CFBundleExecutable": "Resident"},
+            "com.g.rare": {"CFBundleExecutable": "Rare"}}
+    for day in range(1, 8):
+        procs = [{"name": "Game", "states": ["suspended"]}, {"name": "Chat", "states": ["suspended"]},
+                 {"name": "Resident", "states": ["suspended"]}, {"name": "launchd", "states": ["daemon"]}]
+        if day == 1:
+            procs.append({"name": "Rare", "states": ["frontmost"]})
+        if day in (5, 6, 7):
+            procs = procs[1:]  # the game wasn't open those days
+        if day in (3, 4, 5):
+            procs = [x for x in procs if x["name"] != "Chat"]
+        (tmp_path / f"JetsamEvent-{day}.ips").write_text(
+            '{"bug_type":"298"}\n' + json.dumps({"date": f"2026-10-0{day} 10:00:00", "processes": procs}))
+    r = from_memory_reports(sorted(tmp_path.glob("*.ips")), apps, set(apps))
+    o = r["opens"]
+    assert r["ok"] and r["days"] == 7
+    assert o["com.g.game"] > o["com.g.chat"] > o["com.g.rare"]   # 4 days > 4 days halved > 1 day
+    assert o["com.g.resident"] < o["com.g.game"]                  # in memory every day: discounted
+    assert set(r["background"]) == {"com.g.chat", "com.g.resident"}
+    assert not from_memory_reports([], apps, set(apps))["ok"]

@@ -14,7 +14,10 @@
     <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="3" width="11" height="11" rx="3" fill="#ff9f0a"/><rect x="18" y="3" width="11" height="11" rx="3" fill="#30d158"/><rect x="3" y="18" width="11" height="11" rx="3" fill="#0a84ff"/><rect x="18" y="18" width="11" height="11" rx="3" fill="#bf5af2"/></svg>
     <span>Homescreen</span>
   </div>
-  <div class="device" id="device">No device</div>
+  <div class="menu-wrap">
+    <button id="device-btn" class="device-btn" aria-haspopup="true" title="Choose a device"><span id="device">No device</span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <div class="menu device-menu" id="device-menu" hidden></div>
+  </div>
   <div class="spacer"></div>
   <input id="search" type="search" placeholder="Search apps" autocomplete="off" spellcheck="false">
   <div class="group">
@@ -24,7 +27,7 @@
   <div class="menu-wrap">
     <button id="organize-btn" aria-haspopup="true">Organize ▾</button>
     <div class="menu" id="organize-menu" hidden>
-      <button data-op="optimize_usage">Optimize by Screen Time usage</button>
+      <button data-op="optimize_usage">Optimize by app usage</button>
       <button data-op="sort_color">Sort by color</button>
       <button data-op="sort_alpha">Sort A–Z</button>
       <button data-op="group_categories">Group by App Store category…</button>
@@ -36,15 +39,15 @@
   <button id="reset">Reset</button>
   <button id="backups-btn">Backups</button>
   <button id="help" title="How it works" aria-label="Help">?</button>
-  <button id="read" class="primary">Read iPhone</button>
+  <button id="read" class="primary">Read device</button>
 </header>
 
 <main id="main">
   <section id="empty" class="empty" hidden>
     <div class="empty-card">
-      <h1>Arrange your iPhone Home Screen</h1>
-      <p>Connect your iPhone with a cable, unlock it and tap <b>Trust</b> if asked. Then read its Home Screen. Nothing changes on the phone until you choose Apply.</p>
-      <button class="primary big" id="read-empty">Read iPhone</button>
+      <h1>Arrange your Home Screen</h1>
+      <p>Connect your iPhone or iPad with a cable, unlock it and tap <b>Trust</b> if asked. Then read its Home Screen. Nothing changes on the device until you choose Apply.</p>
+      <button class="primary big" id="read-empty">Read device</button>
     </div>
   </section>
   <section id="board" hidden>

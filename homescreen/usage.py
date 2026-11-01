@@ -81,6 +81,59 @@ def load(known: set[str], days: int = 30, root: Path = BIOME) -> dict[str, Any]:
             "devices": [{k: d[k] for k in ("id", "apps", "events", "last")} for d in used]}
 
 
+# ---- usage from the device itself ----------------------------------------------------------
+# Without Screen Time synced to this Mac, the device's JetsamEvent reports still show which apps
+# were held in memory, several times a day. An app in memory on many days is one the person
+# opens, with two catches: iOS also wakes apps in the background (notifications, calls, widgets,
+# location), and keeps some resident all the time. Those are discounted, not trusted.
+
+BACKGROUND_MODES = {"voip"}  # calls wake an app and keep it in memory without it being opened
+
+
+def from_memory_reports(files: list[Path], apps: dict[str, dict[str, Any]], known: set[str]) -> dict[str, Any]:
+    """apps: installed apps as installation_proxy returns them (executable name, background modes)."""
+    import json as _json
+    exe = {a.get("CFBundleExecutable"): b for b, a in apps.items() if a.get("CFBundleExecutable")}
+    days: dict[str, set[str]] = {}
+    seen: Counter = Counter()  # reports an app is in
+    front: Counter = Counter()
+    report_days: set[str] = set()
+    for f in files:
+        try:
+            body = _json.loads(f.read_text(errors="ignore").split("\n", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        day = str(body.get("date", ""))[:10] or f.name
+        report_days.add(day)
+        for p in body.get("processes", []):
+            b = exe.get(p.get("name"))
+            states = p.get("states") or []
+            if not b or b not in known or "daemon" in states:
+                continue
+            days.setdefault(b, set()).add(day)
+            seen[b] += 1
+            if "frontmost" in states:
+                front[b] += 1
+    if not report_days:
+        return {"ok": False, "error": "This device has no memory reports yet (iOS writes them now and then). "
+                "Try again after a few days of use, or use Screen Time."}
+    n = len(report_days)
+    opens: dict[str, int] = {}
+    background: list[str] = []
+    for b, d in days.items():
+        score = len(d) * 10 + seen[b] + front[b] * 5
+        modes = set(apps.get(b, {}).get("UIBackgroundModes") or [])
+        if n >= 7 and len(d) >= 0.9 * n:          # in memory on (nearly) every day of a week+: resident
+            score //= 4
+            background.append(b)
+        elif modes & BACKGROUND_MODES:            # may have been woken, not opened
+            score //= 2
+            background.append(b)
+        opens[b] = max(1, score)
+    return {"ok": True, "source": "device", "days": n, "reports": len(files), "opens": opens,
+            "background": sorted(background)}
+
+
 # ---- swipes -----------------------------------------------------------------------------
 
 def _app_positions(lay: Layout) -> dict[str, int]:
