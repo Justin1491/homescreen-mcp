@@ -145,11 +145,18 @@ App/CLI/MCP reads and writes sharing a data directory cannot overlap.
   It does not expose extra widget settings, phone-created gaps or hidden pages.
   Readback checks observable layout placement and App Library contents, not
   widget content or gaps that iOS does not export.
-- **Wi-Fi hardware validation is pending.** Automated mocked/fixture tests cover
-  transport policy, service payloads, pairing, interruption, identities and all
-  existing layout tests. No real iPhone/iPad was paired or modified while building
-  this feature. Actual USB/Wi-Fi/Auto reads, writes, restores, disconnects, widget
-  settings and iPad rendering require an explicitly approved hardware test.
+- **Hardware validation: one iPhone on iOS 27.2 (2026-11-06).** Trusted USB
+  pairing, a Wi-Fi read with the cable unplugged, and Auto fallback to Wi-Fi
+  succeeded. A dock-only Phone/Messages swap through the bundled MCP engine was
+  backed up, applied once and verified, then the original backup was restored and
+  verified. The restored layout, App Library and exported widget configuration
+  fields matched the original; the user also confirmed the original dock and
+  expected widget content/settings on the phone. Existing unapplied draft edits
+  were preserved by using a separate test draft. This validates that small
+  roundtrip on one device; iPad, stack settings, phone-created gaps, multi-device
+  Auto switching and disconnects during real writes remain untested on hardware.
+  Automated mocked/fixture tests cover transport policy, payload preservation,
+  identity checks, interruptions, cancellation and the existing layout workflows.
 - Rebuild the Mac app to include the new engine and Local Network/Bonjour
   declarations. Existing released DMGs do not contain this branch's changes.
 
