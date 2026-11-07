@@ -378,3 +378,26 @@ def test_usage_from_memory_reports(tmp_path):
     assert o["com.g.resident"] < o["com.g.game"]                  # in memory every day: discounted
     assert set(r["background"]) == {"com.g.chat", "com.g.resident"}
     assert not from_memory_reports([], apps, set(apps))["ok"]
+
+
+def test_duplicate_placement_api_is_undoable_and_survives_reload(dict_phone, tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+    monkeypatch.setenv('HOMESCREEN_FIXTURE', str(dict_phone[0]))
+    monkeypatch.setenv('HOMESCREEN_DATA', str(tmp_path / 'duplicate-appdata'))
+    import homescreen.config as config
+    import homescreen.ui as ui
+    importlib.reload(config)
+    importlib.reload(ui)
+    c = TestClient(ui.app, base_url='http://127.0.0.1:8765')
+    h = {'X-Token': ui.TOKEN}
+    v = c.post('/api/read', json={}, headers=h).json()
+    original = next(n for n in v['pages'][2] if n['kind'] == 'app')
+    v = c.post('/api/op', json={'op': 'duplicate', 'args': {'id': original['id'], 'target': 'page:4'}}, headers=h).json()
+    copy = v['pages'][3][-1]
+    assert copy['id'] != original['id'] and copy['icon'] == original['icon']
+    assert v['diff']['items_moved'] == 1 and not v['diff']['problems']
+    v = c.get('/api/state').json()
+    assert v['pages'][3][-1]['id'] == copy['id']
+    v = c.post('/api/op', json={'op': 'remove_placement', 'args': {'id': copy['id']}}, headers=h).json()
+    assert all(n['id'] != copy['id'] for n in v['pages'][3])
+    assert any(n['id'] == original['id'] for n in v['pages'][2])

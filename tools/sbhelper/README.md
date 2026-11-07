@@ -38,3 +38,24 @@ Findings (iOS 27.2 simulator, 2026-10-31):
   getIconState paths) carry them. The `homescreen.exports` hook in `sbinject.m` dumps all three.
 - Widgets: a configured widget's settings hang off its element id; over USB that is
   `userSelectedElementIdentifier`, and it must be written back as `uniqueIdentifier`.
+
+Duplicate experiment (iOS 27.0 simulator, 2026-11-07):
+- Importing a root archive with `com.apple.mobilecal` on two pages returned YES and left both
+  strings in the on-disk archive. The live `exportState:YES` reported Calendar only on its
+  original page, including after a SpringBoard restart. A repeated bundle identifier in the
+  archive is therefore not sufficient evidence of two live placements.
+- A native App Library drag was not successfully completed in this first experiment. No
+  physical iPhone was written.
+
+Follow-up (iOS 27.0 simulator, 2026-11-07):
+- Invoking `SBHIconManager`'s `addApplicationIconWithBundleIdentifier:toPage:iconIndex:`
+  created a second live Calendar icon. Its live `exportState:YES` record contained the same
+  `bundleIdentifier`, an independently generated UUID `displayIdentifier`, `iconType: app`,
+  and an empty `iconLists`. The disk archive used the same dictionary without `iconLists`.
+- The duplicate survived a SpringBoard restart. After removing it, importing its archive
+  recreated both placements. Importing a newly generated UUID also worked; the project's
+  `to_root_archive` output was independently imported and read back with both placements.
+- Removing the original placement while retaining the UUID-backed icon made SpringBoard
+  report the remaining icon under the ordinary bundle identifier. Verification accounts for
+  this normalization by comparing app identity, position and placement count. The UI drag
+  and physical iPhone behavior remain unverified.

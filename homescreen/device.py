@@ -84,12 +84,15 @@ def _leaf_id(x: dict[str, Any]) -> str:
 
 
 def _modern(x: Any) -> Any:
-    """A list-format item as SpringBoard stores it on disk: apps and web clips become their
-    identifier string; widgets lose the empty iconLists phones attach; folders recurse."""
+    """Convert list-format items to SpringBoard's archive form, preserving app placement IDs."""
     if not isinstance(x, dict):
         return x
     if x.get(DISK_MARK):
         return x["bundleIdentifier"]
+    if (x.get("iconType") == "app" and x.get("bundleIdentifier") and x.get("displayIdentifier")
+            and x.get("displayIdentifier") != x.get("bundleIdentifier")):
+        # Additional app icons are dictionaries identified by their own UUID, not strings.
+        return {k: v for k, v in x.items() if k != "iconLists"}
     if is_widget(x):
         out = {k: v for k, v in x.items() if k != "iconLists"}
         # Over USB a single widget's uniqueIdentifier isn't exported. Its configuration (which

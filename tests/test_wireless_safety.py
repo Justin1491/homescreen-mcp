@@ -156,3 +156,48 @@ def test_remote_info_with_missing_optional_values_can_be_saved(tmp_path):
     session = Session(source, tmp_path / "data")
     asyncio.run(session.read())
     assert Session(source, session.dir).info == {"ProductVersion": "17.4"}
+
+
+def test_duplicate_app_layout_is_not_written_or_overwritten(tmp_path):
+    path = tmp_path / 'phone.plist'
+    from fake_phone import app
+    item = app('com.example.same', 'Same')
+    path.write_bytes(plistlib.dumps([[], [item], [item]]))
+    source = Phone(path)
+    session = Session(source, tmp_path / 'data')
+    asyncio.run(session.read())
+    before = path.read_bytes()
+    with pytest.raises(LayoutError, match='duplicate'):
+        asyncio.run(session.apply(session.require().token()))
+    assert source.writes == 0
+    assert path.read_bytes() == before
+
+
+def test_restore_refuses_duplicate_placements(tmp_path):
+    path = tmp_path / 'phone.plist'
+    from fake_phone import app
+    item = app('com.example.same', 'Same')
+    path.write_bytes(plistlib.dumps([[], [item]]))
+    source = Phone(path)
+    session = Session(source, tmp_path / 'data')
+    asyncio.run(session.read())
+    backup = session._backup([[], [item], [item]], None, 'duplicate')
+    with pytest.raises(LayoutError, match='duplicate'):
+        asyncio.run(session.restore(backup.name))
+    assert source.writes == 0
+
+
+def test_restore_does_not_overwrite_existing_duplicates_in_folder(tmp_path):
+    from fake_phone import app, folder
+    item = app('com.example.same', 'Same')
+    path = tmp_path / 'phone.plist'
+    path.write_bytes(plistlib.dumps([[], [item], [folder('Folder', [item])]]))
+    source = Phone(path)
+    session = Session(source, tmp_path / 'data')
+    asyncio.run(session.read())
+    backup = session._backup([[], [item]], None, 'single')
+    before = path.read_bytes()
+    with pytest.raises(LayoutError, match='duplicate'):
+        asyncio.run(session.restore(backup.name))
+    assert source.writes == 0
+    assert path.read_bytes() == before

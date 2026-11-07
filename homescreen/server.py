@@ -19,11 +19,12 @@ connect_device to select transport and UDID; pair_wifi needs explicit user appro
 Workflow: read_phone -> show_layout -> edit the
 draft (arrange / move / create_folder / sort_* / file_into_folders ...) -> diff -> render_preview
 -> apply only when the user explicitly asks. Every edit is one undo step (undo / redo).
-Item ids: apps use their bundle id; folders and widgets use folder:N / widget:N.
+Item ids identify individual placements; duplicate app icons have distinct placement IDs.
 Targets: 'dock', 'library', 'bank' (a holding tray; empty it before applying), 'page:N'
 (1-based; N = last+1 makes a new page), 'folder:<id>[:N]'.
-To take an app off the Home Screen, move it to 'library' (App Library only). Leaving it out
-does NOT work: iOS puts it back. Pages hold 24 slots (6 rows x 4 columns); widgets take
+Use duplicate_app to add another placement and remove_app_placement to remove one. Removing
+the final placement moves the app to the App Library. Moving a placement to 'library' removes
+only that placement when others remain. Pages hold 24 slots (6 rows x 4 columns); widgets take
 small=2x2, medium=4x2, large=4x4. place_at puts an item in an exact spot, leaving gaps; any move
 drops that. iOS doesn't report gaps made on the phone over USB, so those close on apply. Folders hold 9 per page. Leave page 1 and the dock alone unless asked: they are
 muscle memory. To sort by color, call icon_colors first; get_icons only for the few you
@@ -133,6 +134,18 @@ def move(item_id: str, target: str, index: int | None = None, before: str | None
     (0-based, default end) or just before the item with id `before`.
     'library' = App Library only, off the Home Screen."""
     return _edit(lambda lay: lay.move(item_id, target, index, before))
+
+
+@mcp.tool()
+def duplicate_app(item_id: str, target: str) -> dict[str, Any]:
+    """Create an independently movable app placement on a page, dock, or folder."""
+    return _edit(lambda lay: {"placement_id": lay.duplicate(item_id, target)})
+
+
+@mcp.tool()
+def remove_app_placement(item_id: str) -> dict[str, Any]:
+    """Remove one app icon. The last Home Screen placement goes to the App Library."""
+    return _edit(lambda lay: lay.remove_placement(item_id))
 
 
 @mcp.tool()

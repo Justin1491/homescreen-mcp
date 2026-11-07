@@ -92,6 +92,21 @@ function findItem(id) {
   return null;
 }
 
+function placementDetails(item) {
+  const matchesApp = (n) => n.kind === "app" && n.icon === item.icon;
+  let count = 0, location = "";
+  const visit = (items, where) => {
+    for (const n of items) {
+      if (matchesApp(n)) count++;
+      if (n.id === item.id) location = where;
+      for (const p of n.pages || []) visit(p, `${where}, folder ${n.name}`);
+    }
+  };
+  visit(V.dock, "Dock");
+  V.pages.forEach((page, i) => visit(page, `Page ${i + 1}`));
+  return { count, location };
+}
+
 function toast(msg, kind = "") {
   const t = $("#toast");
   t.textContent = msg;
@@ -396,7 +411,14 @@ function renderDrawer() {
 function renderSelection() {
   const bar = $("#selection-bar");
   bar.hidden = sel.size === 0;
-  $("#sel-count").textContent = `${sel.size} selected`;
+  const selected = [...sel].map(findItem);
+  const one = selected.length === 1 && selected[0];
+  const details = one && one.kind === "app" ? placementDetails(one) : null;
+  $("#sel-count").textContent = details && details.location ? `${one.name} · ${details.location}` : `${sel.size} selected`;
+  const outsideHome = selected.length === 1 && [...(V.library || []), ...V.bank].some((n) => n.id === selected[0]?.id);
+  $("#sel-duplicate").hidden = selected.length !== 1 || !selected[0] || selected[0].kind !== "app" || outsideHome;
+  $("#sel-remove").hidden = $("#sel-duplicate").hidden;
+  $("#sel-library").textContent = details && details.count > 1 ? "Remove from Home Screen" : "To App Library";
   $("#sel-library").disabled = V.library === null;
   $("#sel-unpin").hidden = ![...sel].some((i) => (findItem(i) || {}).pinned);
 }
@@ -410,7 +432,7 @@ function renderFooter() {
   const add = (t, b) => { if (b) { s.appendChild(el("b", null, t)); } else s.appendChild(document.createTextNode(t)); };
   if (!d.items_moved && d.pages_before === d.pages_after && !d.gaps_changed) add("No changes");
   else {
-    add(`${d.items_moved}`, true); add(` apps moved`);
+    add(`${d.items_moved}`, true); add(` icon changes`);
     if (d.to_app_library) { add(" · "); add(`${d.to_app_library}`, true); add(" to App Library"); }
     if (d.pages_before !== d.pages_after) { add(" · pages "); add(`${d.pages_before} → ${d.pages_after}`, true); }
     if (d.gaps_changed) { add(" · "); add(`${d.gaps_changed}`, true); add(" gap change" + (d.gaps_changed > 1 ? "s" : "")); }
@@ -572,6 +594,26 @@ async function newFolderFromSelection() {
 async function selectionToLibrary() {
   const ids = [...sel].filter((i) => { const it = findItem(i); return it && (it.kind === "app" || it.kind === "webclip"); });
   if (ids.length) await moveIds(ids, "library", null);
+}
+
+async function duplicateSelection() {
+  const id = [...sel][0], item = findItem(id);
+  if (!item || item.kind !== "app") return;
+  const page = await promptText("Add another icon", `Choose a page for another ${item.name} icon (1–${V.pages.length + 1}).`, String(V.pages.length));
+  if (page === null || page === "") return;
+  if (!/^\d+$/.test(page) || +page < 1 || +page > V.pages.length + 1) return toast("Enter a valid page number", "error");
+  if (await op("duplicate", { id, target: `page:${+page}` })) { sel.clear(); render(); }
+}
+
+async function removeSelection() {
+  const id = [...sel][0], item = findItem(id);
+  if (!item || item.kind !== "app") return;
+  const details = placementDetails(item);
+  const explanation = details.count > 1
+    ? `Remove the icon on ${details.location}. The ${details.count - 1} other icon${details.count === 2 ? " stays" : "s stay"}.`
+    : `Remove the last Home Screen icon from ${details.location}. The app stays in the App Library.`;
+  if (!(await confirmBox(`Remove this ${item.name} icon?`, explanation, "Remove icon", true))) return;
+  if (await op("remove_placement", { id })) { sel.clear(); render(); }
 }
 
 // ---- devices ------------------------------------------------------------------------------
@@ -858,6 +900,8 @@ $("#keep-first").onchange = (e) => { try { localStorage.setItem("hs.keepFirst", 
 $("#search").oninput = (e) => { query = e.target.value.trim().toLowerCase(); render(); };
 $("#sel-folder").onclick = newFolderFromSelection;
 $("#sel-library").onclick = selectionToLibrary;
+$("#sel-duplicate").onclick = duplicateSelection;
+$("#sel-remove").onclick = removeSelection;
 $("#sel-unpin").onclick = () => op("unpin", { ids: [...sel] }).then((ok) => ok && (sel.clear(), render()));
 $("#sel-clear").onclick = () => { sel.clear(); render(); };
 $("#drawer-close").onclick = () => { openFolder = null; render(); };

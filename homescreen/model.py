@@ -13,6 +13,7 @@ import copy
 import hashlib
 import json
 import plistlib
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -71,6 +72,8 @@ class Node:
 
     def describe(self) -> dict[str, Any]:
         d: dict[str, Any] = {"id": self.id, "kind": self.kind, "name": self.name}
+        if self.bundle_id:
+            d["bundle_id"] = self.bundle_id
         if self.kind == "widget":
             d["size"] = self.raw.get("gridSize")
         if self.kind == "folder":
@@ -129,7 +132,8 @@ class Layout:
                  dock_slots: int = DEFAULT_DOCK_SLOTS, source: list[Any] | None = None,
                  library: list[Any] | None = None, source_library: list[Any] | None = None,
                  bank: list[Any] | None = None, pins: dict[str, int] | None = None,
-                 source_pins: dict[str, int] | None = None, grid: Grid | None = None):
+                 source_pins: dict[str, int] | None = None, grid: Grid | None = None,
+                 _legacy_ids: bool = False):
         """source / source_library: the state as read from the device, when raw_state is a saved draft.
 
         library: App Library-only apps (iOS stores these as "ignored"). None means the device
@@ -143,16 +147,41 @@ class Layout:
         self.source = copy.deepcopy(raw_state if source is None else source)
         self.source_library = copy.deepcopy(library if source is None else source_library)
         self._counter: dict[str, int] = {}
+        self._legacy_ids = _legacy_ids
         self.nodes: dict[str, Node] = {}
         self.dock = [self._wrap(r, "dock") for r in raw_state[0]]
         self.pages = [[self._wrap(r, f"p{i}") for r in page] for i, page in enumerate(raw_state[1:], 1)]
         self.library = None if library is None else [self._wrap(r, "library") for r in library]
         # App Bank: a draft-only tray for items set aside while rearranging. Never written.
         self.bank = [self._wrap(r, "bank") for r in bank or []]
+        names = {n.bundle_id: n.name for n in self.nodes.values()
+                 if n.kind == "app" and n.bundle_id and n.raw.get("displayName")}
+        for n in self.nodes.values():
+            if n.kind == "app" and not n.raw.get("displayName") and n.bundle_id in names:
+                n.name = names[n.bundle_id]
         # Gaps: items pinned to a grid cell (row * 4 + column) on their page. Unpinned items flow
         # into the free cells in order, like iOS does. iOS doesn't report pins over USB.
         self.pins: dict[str, int] = dict(pins or {})
         self.source_pins: dict[str, int] = dict((pins if source is None else source_pins) or {})
+        if not _legacy_ids and any(k.startswith("app:") for k in self.pins):
+            old = Layout(raw_state, library=library, bank=bank, grid=grid, _legacy_ids=True)
+            mapping = {a.id: b.id for a, b in zip(old.nodes.values(), self.nodes.values())}
+            self.pins = {mapping.get(k, k): v for k, v in self.pins.items()}
+        if not _legacy_ids and any(k.startswith("app:") for k in self.source_pins):
+            old = Layout(self.source, library=self.source_library, grid=grid, _legacy_ids=True)
+            new = Layout(self.source, library=self.source_library, grid=grid)
+            mapping = {a.id: b.id for a, b in zip(old.nodes.values(), new.nodes.values())}
+            self.source_pins = {mapping.get(k, k): v for k, v in self.source_pins.items()}
+        # Older drafts used the bundle ID for a lone UUID-backed app icon.
+        for n in self.nodes.values():
+            if n.kind == "app" and n.id != n.bundle_id and n.bundle_id not in self.nodes:
+                if n.bundle_id in self.pins and n.id not in self.pins:
+                    self.pins[n.id] = self.pins.pop(n.bundle_id)
+        source_nodes = self.nodes if source is None else Layout(self.source, library=self.source_library).nodes
+        for n in source_nodes.values():
+            if (n.kind == "app" and n.id != n.bundle_id and n.bundle_id not in source_nodes
+                    and n.bundle_id in self.source_pins and n.id not in self.source_pins):
+                self.source_pins[n.id] = self.source_pins.pop(n.bundle_id)
 
     def original(self) -> "Layout":
         return Layout(self.source, self.page_slots, self.dock_slots, library=self.source_library,
@@ -266,7 +295,13 @@ class Layout:
             name = _widget_name(raw)
         bundle = raw.get("bundleIdentifier") or raw.get("displayIdentifier")
         uid = raw.get("uniqueIdentifier") or (raw.get("displayIdentifier") if kind == "widget" else None)
-        if kind in ("app", "webclip") and bundle and bundle not in self.nodes:
+        display = raw.get("displayIdentifier")
+        if (not self._legacy_ids and kind == "app" and raw.get("iconType") == "app" and isinstance(display, str)
+                and len(display) == 36 and bundle and display != bundle):
+            nid = f"placement:{display}"
+            if nid in self.nodes:
+                nid = self._new_id("app:")
+        elif kind in ("app", "webclip") and bundle and bundle not in self.nodes:
             nid = str(bundle)
         elif kind in ("widget", "folder") and uid and f"{kind}:{uid}" not in self.nodes and ":" not in str(uid):
             nid = f"{kind}:{uid}"  # iOS's own id: stays the same across undo, reloads and moves
@@ -299,7 +334,18 @@ class Layout:
         return [self._unwrap(n) for n in self.bank]
 
     def to_library(self) -> list[Any] | None:
-        return None if self.library is None else [self._unwrap(n) for n in self.library]
+        if self.library is None:
+            return None
+        result = []
+        for n in self.library:
+            raw = self._unwrap(n)
+            if n.kind == "app" and n.bundle_id:
+                raw = dict(raw)
+                raw["displayIdentifier"] = n.bundle_id
+                raw.pop("iconType", None)
+                raw.pop("iconLists", None)
+            result.append(raw)
+        return result
 
     # ---- lookups ----------------------------------------------------------------
 
@@ -355,9 +401,42 @@ class Layout:
 
     def find(self, query: str) -> list[Node]:
         q = query.lower()
-        return [n for n in self.nodes.values() if q in n.name.lower() or q in n.id.lower()]
+        return [n for n in self.nodes.values()
+                if q in n.name.lower() or q in n.id.lower() or q in (n.bundle_id or "").lower()]
 
     # ---- edits ------------------------------------------------------------------
+
+    def duplicate(self, node_id: str, target: str, index: int | None = None) -> str:
+        """Create a separate placement of an installed app in the draft."""
+        node = self.get(node_id)
+        src, _ = self.locate(node_id)
+        if node.kind != "app" or not node.bundle_id or src is self.library or src is self.bank:
+            raise LayoutError("only a placed installed app can be duplicated")
+        if target in ("library", "bank"):
+            raise LayoutError("choose a Home Screen page, dock, or folder")
+        dest = self._target(target)
+        raw = {"bundleIdentifier": node.bundle_id, "displayIdentifier": str(uuid.uuid4()).upper(),
+               "iconType": "app", "displayName": node.name}
+        new = self._wrap(raw, target)
+        dest.insert(len(dest) if index is None else max(0, min(index, len(dest))), new)
+        return new.id
+
+    def remove_placement(self, node_id: str) -> None:
+        """Remove one icon; move the last Home Screen icon to the App Library."""
+        node = self.get(node_id)
+        src, idx = self.locate(node_id)
+        if node.kind != "app" or src is self.library or src is self.bank:
+            raise LayoutError("select an app placement on the Home Screen")
+        other = [self.nodes[i] for i in self.leaf_ids() if i != node_id
+                 and self.nodes[i].kind == "app" and self.nodes[i].bundle_id == node.bundle_id]
+        if not other:
+            if self.library is None:
+                raise LayoutError("the final placement needs an available App Library")
+            self.move(node_id, "library")
+            return
+        src.pop(idx)
+        self.pins.pop(node_id, None)
+        del self.nodes[node_id]
 
     def _target(self, target: str) -> list[Node]:
         """'dock', 'library', 'page:N' (1-based) or 'folder:<id>[:N]'."""
@@ -403,6 +482,12 @@ class Layout:
             raise LayoutError("widgets can't go in the dock")
         if target == "library" and node.kind not in ("app", "webclip"):
             raise LayoutError(f"only apps go in the App Library, not a {node.kind}")
+        if target == "library" and node.kind == "app":
+            others = [self.nodes[i] for i in self.leaf_ids() if i != node_id
+                      and self.nodes[i].kind == "app" and self.nodes[i].bundle_id == node.bundle_id]
+            if others:
+                self.remove_placement(node_id)
+                return
         src, i = self.locate(node_id)
         src.pop(i)
         self.pins.pop(node_id, None)
@@ -457,7 +542,10 @@ class Layout:
         self.pins = {k: v for k, v in self.pins.items() if self.nodes[k] not in items}
         for n in list(items):
             for leaf in ([c for p in n.children for c in p] if n.kind == "folder" else [n]):
-                self.library.append(leaf)
+                if leaf.kind == "app":
+                    self.remove_placement(leaf.id)
+                else:
+                    self.move(leaf.id, "library")
         self.pages.pop(page - 1)
 
     def dissolve_folder(self, folder_id: str) -> None:
@@ -570,12 +658,26 @@ class Layout:
                             errs.append(f"folder {n.name!r} page {j} has {len(fp)} items (max {self.grid.folder})")
                         if any(c.kind in ("folder", "widget") for c in fp):
                             errs.append(f"folder {n.name!r} contains a folder or widget")
-        before = sorted(self.original().leaf_ids())
-        after = sorted(self.leaf_ids())
+        original = self.original()
+        def identities(lay: "Layout") -> list[str]:
+            ids = lay.leaf_ids()
+            apps = {f"installed:{lay.nodes[i].bundle_id}" for i in ids if lay.nodes[i].kind == "app"}
+            return sorted(apps) + sorted(i for i in ids if lay.nodes[i].kind != "app")
+        before = identities(original)
+        after = identities(self)
         if before != after:
             lost = sorted(set(before) - set(after))
             gained = sorted(set(after) - set(before))
             errs.append(f"item set changed: lost {lost}, gained {gained}")
+        active_ids = self.leaf_ids()
+        placement_keys = [str(self.nodes[i].raw.get("displayIdentifier") or self.nodes[i].bundle_id)
+                          for i in active_ids if self.nodes[i].kind == "app"]
+        if len(placement_keys) != len(set(placement_keys)):
+            errs.append("duplicate app placement identifiers are ambiguous")
+        on_home = {self.nodes[i].bundle_id for i in active_ids
+                   if self.nodes[i].kind == "app" and (self.library is None or self.nodes[i] not in self.library)}
+        if self.library and any(n.kind == "app" and n.bundle_id in on_home for n in self.library):
+            errs.append("an app cannot be both placed and App Library-only")
         return errs
 
     # ---- views ------------------------------------------------------------------
@@ -585,6 +687,8 @@ class Layout:
             out = []
             for n in nodes:
                 d: dict[str, Any] = {"id": n.id, "name": n.name}
+                if n.kind == "app" and n.bundle_id:
+                    d["bundle_id"] = n.bundle_id
                 if n.kind == "webclip":
                     d["webclip"] = True
                 if n.kind == "folder":
@@ -667,7 +771,24 @@ class Layout:
             for i in ids:
                 if i in old and i not in keep and not i.startswith(("folder:", "widget:")):
                     moved[i] = f"{old[i]} -> {new[i]}"
-        names = {k: self.nodes[k].name for k in moved}
+        added, removed = set(new) - set(old), set(old) - set(new)
+        for i in list(added):
+            node = self.nodes[i]
+            if node.kind != "app" or new[i] != "App Library":
+                continue
+            previous = next((j for j in removed if src.nodes[j].kind == "app"
+                             and src.nodes[j].bundle_id == node.bundle_id), None)
+            if previous:
+                moved[previous] = f"{old[previous]} -> App Library"
+                added.remove(i)
+                removed.remove(previous)
+        for i in added:
+            if self.nodes[i].kind == "app":
+                moved[i] = f"added placement -> {new[i]}"
+        for i in removed:
+            if src.nodes[i].kind == "app":
+                moved[i] = f"{old[i]} -> removed placement"
+        names = {k: (self.nodes.get(k) or src.nodes[k]).name for k in moved}
         return {
             "items_moved": len(moved),
             "pages_before": len(self.source) - 1,
@@ -722,7 +843,7 @@ def structure(state: list[Any], library: list[Any] | None = None) -> str:
             return [n.name, [shape(p) for p in n.children]]
         if n.kind == "widget":  # widget ids are positional, so compare by content
             return f"widget:{n.name}:{n.raw.get('gridSize')}"
-        return n.id
+        return n.bundle_id if n.kind == "app" else n.id
 
     def shape(nodes: list[Node]) -> list[Any]:
         return [key(n) for n in nodes]
