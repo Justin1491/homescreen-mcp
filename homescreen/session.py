@@ -134,6 +134,28 @@ def _safe(s: str) -> str:
     return "".join(c if c.isalnum() or c in "-._" else "_" for c in s)
 
 
+def _duplicate_apps(state: list[Any]) -> set[str]:
+    """App identities occurring more than once on the Home Screen, including folders."""
+    lay = Layout(state)
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+
+    def walk(items: list[Node]) -> None:
+        for node in items:
+            if node.kind == "folder":
+                for page in node.children:
+                    walk(page)
+            elif node.kind == "app" and node.bundle_id:
+                if node.bundle_id in seen:
+                    duplicates.add(node.bundle_id)
+                seen.add(node.bundle_id)
+
+    walk(lay.dock)
+    for page in lay.pages:
+        walk(page)
+    return duplicates
+
+
 def _device_operation(fn):
     @functools.wraps(fn)
     async def run(self, *args, **kwargs):
@@ -446,6 +468,10 @@ class Session:
         self._require_resolved_write()
         await self._verify_identity()
         current, current_lib = await self._read_source()
+        if _duplicate_apps(current) or _duplicate_apps(target):
+            raise LayoutError("Cannot write a layout containing duplicate app placements: "
+                              "SpringBoard duplicate import and readback are not verified. "
+                              "No layout was written.")
         backup = self._backup(current, current_lib, label,
                               pins_by_page(self._layout_from(current, current_lib)))
         target = self._restore_widget_ids(target)

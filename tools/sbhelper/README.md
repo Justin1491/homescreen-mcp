@@ -38,3 +38,11 @@ Findings (iOS 27.2 simulator, 2026-10-31):
   getIconState paths) carry them. The `homescreen.exports` hook in `sbinject.m` dumps all three.
 - Widgets: a configured widget's settings hang off its element id; over USB that is
   `userSelectedElementIdentifier`, and it must be written back as `uniqueIdentifier`.
+
+Duplicate experiment (iOS 27.0 simulator, 2026-11-07):
+- Importing a root archive with `com.apple.mobilecal` on two pages returned YES and left both
+  strings in the on-disk archive. The live `exportState:YES` reported Calendar only on its
+  original page, including after a SpringBoard restart. A repeated bundle identifier in the
+  archive is therefore not sufficient evidence of two live placements.
+- A native App Library drag was not successfully completed, so the representation of a
+  natively created duplicate and its USB export remain unknown. No physical iPhone was written.

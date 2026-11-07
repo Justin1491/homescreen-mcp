@@ -248,6 +248,10 @@ Data (drafts, backups, icon cache) lives in `~/Library/Application Support/homes
 
 ## Limitations
 
+- Duplicate app placements are not yet supported. Apply and Restore refuse a write if the
+  current or requested layout reports the same app more than once. This guard only sees
+  placements reported by the device; it cannot protect duplicates omitted from its export.
+  Do not apply a layout if your Home Screen has duplicate icons until support is verified.
 - Hidden pages and gaps made on the phone itself can't be read (see above).
 - **iPad support is new.** The grid, dock size and folder size come from the device (an iPad Air 13" reports 5×6, a 26-app dock and 16 per folder page), and arranging through MCP or the CLI works (tested on iPadOS 26.6.2). The editor draws the iPad's grid. iPad widget sizes don't map onto the icon grid like iPhone ones, so a widget page is only accepted when it keeps the shape iPadOS gave it.
 - A few system apps that iOS never shows on the Home Screen are listed in `NEVER_ON_HOME_SCREEN` (`homescreen/device.py`). If a write reports one under `added_by_ios`, add it there.
