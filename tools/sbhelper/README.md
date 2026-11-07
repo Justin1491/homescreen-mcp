@@ -56,6 +56,6 @@ Follow-up (iOS 27.0 simulator, 2026-11-07):
   recreated both placements. Importing a newly generated UUID also worked; the project's
   `to_root_archive` output was independently imported and read back with both placements.
 - Removing the original placement while retaining the UUID-backed icon made SpringBoard
-  report the remaining icon under the ordinary bundle identifier. A verification or draft
-  identity scheme must account for this normalization. The UI drag and physical iPhone
-  behavior remain unverified, and the write guard remains in place.
+  report the remaining icon under the ordinary bundle identifier. Verification accounts for
+  this normalization by comparing app identity, position and placement count. The UI drag
+  and physical iPhone behavior remain unverified.

@@ -230,7 +230,7 @@ Keys it leaves out (Today View, page IDs) keep their values on the phone. Any in
   - page capacity: 24 slots; small/medium/large widgets take 4/8/16
   - dock of 4, and folders of 9 per page
   - no folders or widgets inside folders
-  - no item lost or duplicated, and an empty App Bank
+  - installed apps and non-app items retained, distinct placement identifiers, and an empty App Bank
 - **Screen Time** comes from the Biome `App.InFocus` streams macOS keeps for synced devices. Page swipes are estimated as page *N* costing *N−1* swipes, plus folder pages, with the dock free.
 - **Local only.** The app listens on 127.0.0.1, and every change request needs a per-launch token. Device connections stay on USB/the local network. The optional internet call is *Group by App Store category*: it sends bundle IDs to Apple's public lookup API, asks first, and caches the results.
 
@@ -248,10 +248,12 @@ Data (drafts, backups, icon cache) lives in `~/Library/Application Support/homes
 
 ## Limitations
 
-- Duplicate app placements are not yet supported. Apply and Restore refuse a write if the
-  current or requested layout reports the same app more than once. This guard only sees
-  placements reported by the device; it cannot protect duplicates omitted from its export.
-  Do not apply a layout if your Home Screen has duplicate icons until support is verified.
+- Select an app icon and choose **Add another icon** to place another copy on a page; each
+  copy can be moved or removed independently. Removing the final Home Screen icon sends the
+  app to the App Library. Duplicate creation and readback were tested on an iOS 27.0
+  simulator; duplicate writes and readback have not been verified on a physical iPhone.
+  Apply and Restore reject ambiguous repeated placement identifiers. As with other layout
+  details, verification can only check what the device reports.
 - Hidden pages and gaps made on the phone itself can't be read (see above).
 - **iPad support is new.** The grid, dock size and folder size come from the device (an iPad Air 13" reports 5×6, a 26-app dock and 16 per folder page), and arranging through MCP or the CLI works (tested on iPadOS 26.6.2). The editor draws the iPad's grid. iPad widget sizes don't map onto the icon grid like iPhone ones, so a widget page is only accepted when it keeps the shape iPadOS gave it.
 - A few system apps that iOS never shows on the Home Screen are listed in `NEVER_ON_HOME_SCREEN` (`homescreen/device.py`). If a write reports one under `added_by_ios`, add it there.

@@ -54,7 +54,7 @@ async def render(session: Session, out: Path, show_original: bool = True) -> Pat
             inner = "".join([await img(c) for p in node.children for c in p][:9])
             return f'<div class="cell folder"><div class="ph">{inner}</div><span>{name}</span></div>'
         cls = "cell moved" if mark and node.id in moved else "cell"
-        return f'<div class="{cls}">{await img(node)}<span>{name}</span></div>'
+        return f'<div class="{cls}" title="{html.escape(node.id, quote=True)}">{await img(node)}<span>{name}</span></div>'
 
     async def phone(layout: Layout, title: str, mark: bool) -> str:
         parts = []
@@ -67,7 +67,7 @@ async def render(session: Session, out: Path, show_original: bool = True) -> Pat
         return f'<div class="row">{"".join(parts)}</div>'
 
     d = lay.diff()
-    body = [f"<h1>Home Screen draft</h1><div class='sub'>{d['items_moved']} items moved · "
+    body = [f"<h1>Home Screen draft</h1><div class='sub'>{d['items_moved']} icon changes · "
             f"{d['pages_before']} → {d['pages_after']} pages · {d['to_app_library']} to App Library · "
             f"{'no problems' if not d['problems'] else html.escape('; '.join(d['problems']))}</div>",
             "<h2>Draft</h2>", await phone(lay, "Draft", True)]

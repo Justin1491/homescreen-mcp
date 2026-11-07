@@ -58,7 +58,7 @@ def _unpack_pins(data: bytes) -> list[dict[str, int]] | None:
 
 def pin_key(node: Node) -> str | None:
     if node.kind in ("app", "webclip"):
-        return node.bundle_id or node.id
+        return node.raw.get("displayIdentifier") or node.bundle_id or node.id
     if node.kind == "widget":
         return node.raw.get("uniqueIdentifier") or node.raw.get("userSelectedElementIdentifier")
     if node.kind == "folder":
@@ -105,6 +105,26 @@ def node_pins(lay: Layout, keyed: dict[str, int], by_memory: bool = False) -> di
     return wanted
 
 
+def _normalize_pin_keys(target: list[Any], after: list[Any], pins: dict[str, int]) -> dict[str, int]:
+    """Follow iOS's UUID-to-bundle normalization when only one placement remains."""
+    wanted, actual = Layout(target), Layout(after)
+    remapped = dict(pins)
+    for page in wanted.pages:
+        for node in page:
+            key = pin_key(node)
+            if node.kind != "app" or key not in pins:
+                continue
+            before = [wanted.nodes[i] for i in wanted.leaf_ids()
+                      if wanted.nodes[i].kind == "app" and wanted.nodes[i].bundle_id == node.bundle_id]
+            now = [actual.nodes[i] for i in actual.leaf_ids()
+                   if actual.nodes[i].kind == "app" and actual.nodes[i].bundle_id == node.bundle_id]
+            if len(before) == len(now) == 1:
+                new_key = pin_key(now[0])
+                if new_key and new_key != key:
+                    remapped[new_key] = remapped.pop(key)
+    return remapped
+
+
 def placed_structure(state: list[Any], library: list[Any] | None, keyed_pins: dict[str, int] | None,
                      grid: Grid | None = None) -> str:
     """Like model.structure, but each page lists its items in grid order (row by row) after
@@ -113,14 +133,20 @@ def placed_structure(state: list[Any], library: list[Any] | None, keyed_pins: di
     lay = Layout(state, library=library, grid=grid)
     if keyed_pins:
         node_pins(lay, keyed_pins)
+    def identity(n: Node) -> str:
+        if n.kind == "app":
+            return n.bundle_id or n.id
+        if n.kind == "widget" and n.raw.get("displayIdentifier"):
+            return f"widget:{n.raw['displayIdentifier']}"
+        return n.id
     pages = []
     for page in lay.pages:
         pos, _ = lay.place(page)
         order = sorted(page, key=lambda n: (pos[n.id][0], pos[n.id][1]) if n.id in pos else (99, 0))
-        pages.append([[n.id, pos.get(n.id, (0, 0))[:2]] if n.kind != "folder" else
-                      [n.name, [[c.id for c in fp] for fp in n.children]] for n in order])
-    return json.dumps({"dock": [n.id for n in lay.dock], "pages": pages,
-                       "library": None if library is None else sorted(n.id for n in lay.library or [])},
+        pages.append([[identity(n), pos.get(n.id, (0, 0))[:2]] if n.kind != "folder" else
+                      [n.name, [[identity(c) for c in fp] for fp in n.children]] for n in order])
+    return json.dumps({"dock": [identity(n) for n in lay.dock], "pages": pages,
+                       "library": None if library is None else sorted(identity(n) for n in lay.library or [])},
                       default=list)
 
 
@@ -135,7 +161,7 @@ def _safe(s: str) -> str:
 
 
 def _duplicate_apps(state: list[Any]) -> set[str]:
-    """App identities occurring more than once on the Home Screen, including folders."""
+    """Repeated placement identifiers cannot safely distinguish independent app icons."""
     lay = Layout(state)
     seen: set[str] = set()
     duplicates: set[str] = set()
@@ -146,9 +172,10 @@ def _duplicate_apps(state: list[Any]) -> set[str]:
                 for page in node.children:
                     walk(page)
             elif node.kind == "app" and node.bundle_id:
-                if node.bundle_id in seen:
-                    duplicates.add(node.bundle_id)
-                seen.add(node.bundle_id)
+                key = node.raw.get("displayIdentifier") or node.bundle_id
+                if key in seen:
+                    duplicates.add(key)
+                seen.add(key)
 
     walk(lay.dock)
     for page in lay.pages:
@@ -469,8 +496,8 @@ class Session:
         await self._verify_identity()
         current, current_lib = await self._read_source()
         if _duplicate_apps(current) or _duplicate_apps(target):
-            raise LayoutError("Cannot write a layout containing duplicate app placements: "
-                              "SpringBoard duplicate import and readback are not verified. "
+            raise LayoutError("Cannot write a layout containing duplicate app placement identifiers: "
+                              "The individual placements cannot be distinguished. "
                               "No layout was written.")
         backup = self._backup(current, current_lib, label,
                               pins_by_page(self._layout_from(current, current_lib)))
@@ -489,7 +516,8 @@ class Session:
             raise LayoutError("A write is pending or unverified. Read the device before another write.")
         write_error = None
         try:
-            await self.source.write(target, target_lib, pins)
+            # Keep the expected layout immutable even if a Source modifies its arguments.
+            await self.source.write(copy.deepcopy(target), copy.deepcopy(target_lib), copy.deepcopy(pins))
         except Exception as e:
             write_error = str(e)
         # A lost response cannot tell us whether the write landed. Read once on a
@@ -505,7 +533,7 @@ class Session:
         want_pins = {k: v for page in pins or [] for k, v in page.items()}
         # the phone can't report gaps; there the written gaps are taken as given and the order checked
         got_pins = getattr(self.source, "pins", None)
-        got_pins = want_pins if got_pins is None else got_pins
+        got_pins = _normalize_pin_keys(target, after, want_pins) if got_pins is None else got_pins
         ok = (placed_structure(after, after_lib if lib_known else None, got_pins, self.grid)
               == placed_structure(target, target_lib, want_pins, self.grid))
         res: dict[str, Any] = {"ok": ok, "backup": backup.name,
@@ -535,7 +563,7 @@ class Session:
         if ok:
             # remember the gaps that were just written (the phone won't report them back)
             written = Layout(after, library=after_lib, grid=self.grid)
-            node_pins(written, {k: v for page in pins or [] for k, v in page.items()})
+            node_pins(written, _normalize_pin_keys(target, after, want_pins))
             self._remember_gaps(written)
         self.layout = self._layout_from(after, after_lib)
         self._undo.clear()

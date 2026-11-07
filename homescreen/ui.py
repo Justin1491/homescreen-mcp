@@ -110,6 +110,8 @@ def view() -> dict[str, Any]:
 
 def _ops() -> dict[str, Callable[..., Callable[[Layout], Any]]]:
     return {
+        "duplicate": lambda id, target: lambda lay: lay.duplicate(id, target),
+        "remove_placement": lambda id: lambda lay: lay.remove_placement(id),
         "move": lambda id, target, index=None, before=None: lambda lay: lay.move(id, target, index, before),
         "move_many": lambda ids, target, before=None: lambda lay: [lay.move(i, target, None, before) for i in ids],
         "swap": lambda a, b: lambda lay: lay.swap(a, b),
