@@ -268,3 +268,23 @@ def test_restore_old_backup_without_library(tmp_path):
     (bdir / "20200101-000000-old.plist").write_bytes(plistlib.dumps(state))  # old style: bare list
     res = run(s.restore("20200101-000000-old.plist"))
     assert res["ok"] and res["app_library_only"] == 1, res
+
+
+def test_root_archive_preserves_native_duplicate_app_identity():
+    from homescreen.device import to_root_archive
+    original = app('com.example.chat', 'Chat')
+    duplicate = {'bundleIdentifier': 'com.example.chat',
+                 'displayIdentifier': '11111111-2222-3333-4444-555555555555',
+                 'iconType': 'app', 'iconLists': []}
+    archive = to_root_archive([[], [original], [duplicate]], [])
+    assert archive['iconLists'] == [
+        ['com.example.chat'],
+        [{'bundleIdentifier': 'com.example.chat',
+          'displayIdentifier': '11111111-2222-3333-4444-555555555555', 'iconType': 'app'}],
+    ]
+
+
+def test_root_archive_app_without_display_identifier_uses_bundle_identifier():
+    from homescreen.device import to_root_archive
+    state = [[], [{'bundleIdentifier': 'com.example.chat', 'iconType': 'app'}]]
+    assert to_root_archive(state, [])['iconLists'] == [['com.example.chat']]

@@ -44,5 +44,18 @@ Duplicate experiment (iOS 27.0 simulator, 2026-11-07):
   strings in the on-disk archive. The live `exportState:YES` reported Calendar only on its
   original page, including after a SpringBoard restart. A repeated bundle identifier in the
   archive is therefore not sufficient evidence of two live placements.
-- A native App Library drag was not successfully completed, so the representation of a
-  natively created duplicate and its USB export remain unknown. No physical iPhone was written.
+- A native App Library drag was not successfully completed in this first experiment. No
+  physical iPhone was written.
+
+Follow-up (iOS 27.0 simulator, 2026-11-07):
+- Invoking `SBHIconManager`'s `addApplicationIconWithBundleIdentifier:toPage:iconIndex:`
+  created a second live Calendar icon. Its live `exportState:YES` record contained the same
+  `bundleIdentifier`, an independently generated UUID `displayIdentifier`, `iconType: app`,
+  and an empty `iconLists`. The disk archive used the same dictionary without `iconLists`.
+- The duplicate survived a SpringBoard restart. After removing it, importing its archive
+  recreated both placements. Importing a newly generated UUID also worked; the project's
+  `to_root_archive` output was independently imported and read back with both placements.
+- Removing the original placement while retaining the UUID-backed icon made SpringBoard
+  report the remaining icon under the ordinary bundle identifier. A verification or draft
+  identity scheme must account for this normalization. The UI drag and physical iPhone
+  behavior remain unverified, and the write guard remains in place.
